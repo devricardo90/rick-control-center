@@ -45,10 +45,10 @@ Two project skills are mandatory at specific phases. Invoke them with the `/` pr
 Every commit candidate must pass all four gates in order:
 
 ```bash
-pnpm lint        # ESLint 9 flat config
-pnpm typecheck   # vue-tsc + tsc --noEmit across all packages
-pnpm test        # Vitest unit tests
-pnpm build       # Nuxt production build
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
 Run `pnpm validate` to execute all four in sequence.
@@ -57,23 +57,21 @@ Run `pnpm validate` to execute all four in sequence.
 
 ## 4. Prohibited Patterns
 
-The following are hard violations. Never introduce them:
-
 | Pattern | Rule |
 |---------|------|
 | `: any` | Forbidden — use `unknown` and narrow |
 | `as any` | Forbidden — use type guards |
 | `@ts-ignore` | Forbidden — fix the type error |
-| `@ts-expect-error` without comment + test | Forbidden without exception (see skill) |
+| `@ts-expect-error` without comment + test | Forbidden without exception |
 | Empty `catch` blocks | Forbidden — always handle or rethrow with context |
-| Weakening `tsconfig.json` | Forbidden — never lower strictness to make code pass |
+| Weakening `tsconfig.json` | Forbidden |
 | Inline `eslint-disable` without justification | Forbidden |
 
 ---
 
 ## 5. Architecture Boundaries
 
-Respect the package dependency direction at all times:
+Respect the package dependency direction:
 
 ```
 @rick/shared  →  @rick/domain  →  @rick/application  →  apps/web
@@ -81,18 +79,17 @@ Respect the package dependency direction at all times:
 
 - `@rick/domain` must not import from `apps/web` or infrastructure packages.
 - `@rick/application` must not import database or HTTP libraries directly.
-- External inputs (HTTP, env vars, IPC) must be typed as `unknown` at the boundary.
+- External inputs must be typed as `unknown` at the boundary.
 - Domain types and HTTP DTOs must remain separate.
 
 ---
 
 ## 6. Branch and Commit Policy
 
-- Every task runs on a dedicated branch: `feat/<JIRA-ID>-<slug>` or `fix/<JIRA-ID>-<slug>`.
+- Every task runs on a dedicated branch.
 - The `main` branch does not receive direct commits.
-- Commit messages follow Conventional Commits: `type(scope): description — JIRA-ID`.
-- A commit is created only after all validation gates pass and `/rick-code-review` returns `APPROVED`.
-- A push occurs only after a successful commit.
+- Commit messages follow Conventional Commits.
+- Commit only after validation and an `APPROVED` review.
 
 ---
 
@@ -102,4 +99,53 @@ Respect the package dependency direction at all times:
 - Do not refactor unrelated code opportunistically.
 - Do not add dependencies beyond what the task requires.
 - Secrets must never appear in code, logs, commits, or comments.
-- If a required change would expand scope, stop and report — do not proceed silently.
+- If a required change would expand scope, stop and report.
+
+---
+
+## 8. Mandatory Code Quality Policy
+
+Never weaken these settings to make code pass.
+
+### TypeScript Compiler
+
+| Flag | Value |
+|------|-------|
+| `strict` | `true` |
+| `useUnknownInCatchVariables` | `true` |
+| `noUncheckedIndexedAccess` | `true` |
+| `exactOptionalPropertyTypes` | `true` |
+| `noImplicitReturns` | `true` |
+| `noFallthroughCasesInSwitch` | `true` |
+| `noUnusedLocals` | `true` |
+| `noUnusedParameters` | `true` |
+
+### ESLint Rules
+
+| Rule | Severity | Scope |
+|------|----------|-------|
+| `@typescript-eslint/no-explicit-any` | error | All TS/Vue files |
+| `@typescript-eslint/no-non-null-assertion` | error | All TS/Vue files |
+| `@typescript-eslint/no-unsafe-assignment` | error | Package source files |
+| `@typescript-eslint/no-unsafe-argument` | error | Package source files |
+| `@typescript-eslint/no-unsafe-call` | error | Package source files |
+| `@typescript-eslint/no-unsafe-member-access` | error | Package source files |
+| `@typescript-eslint/no-unsafe-return` | error | Package source files |
+| `complexity` | error (max 10) | All TS/Vue files |
+| `max-depth` | error (max 3) | All TS/Vue files |
+| `max-params` | error (max 4) | All TS/Vue files |
+| `max-lines-per-function` | warn (max 60) | All TS/Vue files |
+
+---
+
+## 9. Type Safety Gate
+
+External or untrusted data must be `unknown` at the boundary and narrowed before use.
+
+```bash
+pnpm quality:types
+pnpm quality:forbidden-patterns
+pnpm quality:review
+```
+
+Run `pnpm quality:review` in addition to `pnpm validate`.
