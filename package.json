@@ -1,0 +1,31 @@
+{
+  "name": "rick-control-center",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RICK Control Center — AI-assisted software execution platform",
+  "scripts": {
+    "dev": "pnpm --filter @rick/web dev",
+    "build": "pnpm --filter @rick/web build",
+    "preview": "pnpm --filter @rick/web preview",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "validate": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@nuxt/eslint-config": "^0.7.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "@vitest/ui": "^3.2.0",
+    "eslint": "^9.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
