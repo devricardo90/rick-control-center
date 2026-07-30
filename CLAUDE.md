@@ -45,10 +45,10 @@ Two project skills are mandatory at specific phases. Invoke them with the `/` pr
 Every commit candidate must pass all four gates in order:
 
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
+pnpm lint        # ESLint 9 flat config
+pnpm typecheck   # vue-tsc + tsc --noEmit across all packages
+pnpm test        # Vitest unit tests
+pnpm build       # Nuxt production build
 ```
 
 Run `pnpm validate` to execute all four in sequence.
@@ -57,21 +57,23 @@ Run `pnpm validate` to execute all four in sequence.
 
 ## 4. Prohibited Patterns
 
+The following are hard violations. Never introduce them:
+
 | Pattern | Rule |
 |---------|------|
 | `: any` | Forbidden — use `unknown` and narrow |
 | `as any` | Forbidden — use type guards |
 | `@ts-ignore` | Forbidden — fix the type error |
-| `@ts-expect-error` without comment + test | Forbidden without exception |
+| `@ts-expect-error` without comment + test | Forbidden without exception (see skill) |
 | Empty `catch` blocks | Forbidden — always handle or rethrow with context |
-| Weakening `tsconfig.json` | Forbidden |
+| Weakening `tsconfig.json` | Forbidden — never lower strictness to make code pass |
 | Inline `eslint-disable` without justification | Forbidden |
 
 ---
 
 ## 5. Architecture Boundaries
 
-Respect the package dependency direction:
+Respect the package dependency direction at all times:
 
 ```
 @rick/shared  →  @rick/domain  →  @rick/application  →  apps/web
@@ -79,17 +81,18 @@ Respect the package dependency direction:
 
 - `@rick/domain` must not import from `apps/web` or infrastructure packages.
 - `@rick/application` must not import database or HTTP libraries directly.
-- External inputs must be typed as `unknown` at the boundary.
+- External inputs (HTTP, env vars, IPC) must be typed as `unknown` at the boundary.
 - Domain types and HTTP DTOs must remain separate.
 
 ---
 
 ## 6. Branch and Commit Policy
 
-- Every task runs on a dedicated branch.
+- Every task runs on a dedicated branch: `feat/<JIRA-ID>-<slug>` or `fix/<JIRA-ID>-<slug>`.
 - The `main` branch does not receive direct commits.
-- Commit messages follow Conventional Commits.
-- Commit only after validation and an `APPROVED` review.
+- Commit messages follow Conventional Commits: `type(scope): description — JIRA-ID`.
+- A commit is created only after all validation gates pass and `/rick-code-review` returns `APPROVED`.
+- A push occurs only after a successful commit.
 
 ---
 
@@ -99,38 +102,38 @@ Respect the package dependency direction:
 - Do not refactor unrelated code opportunistically.
 - Do not add dependencies beyond what the task requires.
 - Secrets must never appear in code, logs, commits, or comments.
-- If a required change would expand scope, stop and report.
+- If a required change would expand scope, stop and report — do not proceed silently.
 
 ---
 
 ## 8. Mandatory Code Quality Policy
 
-Never weaken these settings to make code pass.
+All TypeScript code in this repository is subject to the following compiler and lint configuration. **Never weaken these settings to make code pass.**
 
-### TypeScript Compiler
+### TypeScript Compiler (tsconfig.json)
 
-| Flag | Value |
-|------|-------|
-| `strict` | `true` |
-| `useUnknownInCatchVariables` | `true` |
-| `noUncheckedIndexedAccess` | `true` |
-| `exactOptionalPropertyTypes` | `true` |
-| `noImplicitReturns` | `true` |
-| `noFallthroughCasesInSwitch` | `true` |
-| `noUnusedLocals` | `true` |
-| `noUnusedParameters` | `true` |
+| Flag | Value | Enforcement |
+|------|-------|-------------|
+| `strict` | `true` | Enables all strict checks including `useUnknownInCatchVariables` |
+| `useUnknownInCatchVariables` | `true` | Explicit; catch error variables are typed `unknown` |
+| `noUncheckedIndexedAccess` | `true` | Array/record access returns `T \| undefined` |
+| `exactOptionalPropertyTypes` | `true` | Optional props cannot be set to `undefined` unless declared |
+| `noImplicitReturns` | `true` | All code paths must return |
+| `noFallthroughCasesInSwitch` | `true` | No fall-through between switch cases |
+| `noUnusedLocals` | `true` | No dead variable declarations |
+| `noUnusedParameters` | `true` | Prefix unused params with `_` |
 
-### ESLint Rules
+### ESLint Rules (eslint.config.mjs)
 
 | Rule | Severity | Scope |
 |------|----------|-------|
 | `@typescript-eslint/no-explicit-any` | error | All TS/Vue files |
 | `@typescript-eslint/no-non-null-assertion` | error | All TS/Vue files |
-| `@typescript-eslint/no-unsafe-assignment` | error | Package source files |
-| `@typescript-eslint/no-unsafe-argument` | error | Package source files |
-| `@typescript-eslint/no-unsafe-call` | error | Package source files |
-| `@typescript-eslint/no-unsafe-member-access` | error | Package source files |
-| `@typescript-eslint/no-unsafe-return` | error | Package source files |
+| `@typescript-eslint/no-unsafe-assignment` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-argument` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-call` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-member-access` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-return` | error | `packages/*/src/**/*.ts` (typed) |
 | `complexity` | error (max 10) | All TS/Vue files |
 | `max-depth` | error (max 3) | All TS/Vue files |
 | `max-params` | error (max 4) | All TS/Vue files |
@@ -140,12 +143,31 @@ Never weaken these settings to make code pass.
 
 ## 9. Type Safety Gate
 
-External or untrusted data must be `unknown` at the boundary and narrowed before use.
+All data entering from external or untrusted sources must be typed as `unknown` at the boundary, then narrowed before use. This applies to:
 
-```bash
-pnpm quality:types
-pnpm quality:forbidden-patterns
-pnpm quality:review
+- HTTP request/response bodies
+- Environment variables (`process.env.*`)
+- File system reads
+- IPC and inter-process messages
+- External library return values that lack precise types
+
+**Pattern:**
+```typescript
+// ✓ Correct — unknown at boundary, narrowed before use
+const raw: unknown = await fetch('/api/data').then(r => r.json())
+if (!isMySchema(raw)) throw new Error('Invalid response shape')
+const data: MySchema = raw
+
+// ✗ Wrong — assumed type at boundary
+const data = await fetch('/api/data').then(r => r.json() as MySchema)
 ```
 
-Run `pnpm quality:review` in addition to `pnpm validate`.
+**Quality scripts:**
+
+```bash
+pnpm quality:types              # TypeScript compiler type check only
+pnpm quality:forbidden-patterns # AST-based scan for any/as-any/@ts-ignore/empty-catch
+pnpm quality:review             # Both of the above in sequence
+```
+
+Run `pnpm quality:review` as a pre-commit check in addition to `pnpm validate`.
