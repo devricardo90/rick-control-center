@@ -103,3 +103,71 @@ Respect the package dependency direction at all times:
 - Do not add dependencies beyond what the task requires.
 - Secrets must never appear in code, logs, commits, or comments.
 - If a required change would expand scope, stop and report — do not proceed silently.
+
+---
+
+## 8. Mandatory Code Quality Policy
+
+All TypeScript code in this repository is subject to the following compiler and lint configuration. **Never weaken these settings to make code pass.**
+
+### TypeScript Compiler (tsconfig.json)
+
+| Flag | Value | Enforcement |
+|------|-------|-------------|
+| `strict` | `true` | Enables all strict checks including `useUnknownInCatchVariables` |
+| `useUnknownInCatchVariables` | `true` | Explicit; catch error variables are typed `unknown` |
+| `noUncheckedIndexedAccess` | `true` | Array/record access returns `T \| undefined` |
+| `exactOptionalPropertyTypes` | `true` | Optional props cannot be set to `undefined` unless declared |
+| `noImplicitReturns` | `true` | All code paths must return |
+| `noFallthroughCasesInSwitch` | `true` | No fall-through between switch cases |
+| `noUnusedLocals` | `true` | No dead variable declarations |
+| `noUnusedParameters` | `true` | Prefix unused params with `_` |
+
+### ESLint Rules (eslint.config.mjs)
+
+| Rule | Severity | Scope |
+|------|----------|-------|
+| `@typescript-eslint/no-explicit-any` | error | All TS/Vue files |
+| `@typescript-eslint/no-non-null-assertion` | error | All TS/Vue files |
+| `@typescript-eslint/no-unsafe-assignment` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-argument` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-call` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-member-access` | error | `packages/*/src/**/*.ts` (typed) |
+| `@typescript-eslint/no-unsafe-return` | error | `packages/*/src/**/*.ts` (typed) |
+| `complexity` | error (max 10) | All TS/Vue files |
+| `max-depth` | error (max 3) | All TS/Vue files |
+| `max-params` | error (max 4) | All TS/Vue files |
+| `max-lines-per-function` | warn (max 60) | All TS/Vue files |
+
+---
+
+## 9. Type Safety Gate
+
+All data entering from external or untrusted sources must be typed as `unknown` at the boundary, then narrowed before use. This applies to:
+
+- HTTP request/response bodies
+- Environment variables (`process.env.*`)
+- File system reads
+- IPC and inter-process messages
+- External library return values that lack precise types
+
+**Pattern:**
+```typescript
+// ✓ Correct — unknown at boundary, narrowed before use
+const raw: unknown = await fetch('/api/data').then(r => r.json())
+if (!isMySchema(raw)) throw new Error('Invalid response shape')
+const data: MySchema = raw
+
+// ✗ Wrong — assumed type at boundary
+const data = await fetch('/api/data').then(r => r.json() as MySchema)
+```
+
+**Quality scripts:**
+
+```bash
+pnpm quality:types              # TypeScript compiler type check only
+pnpm quality:forbidden-patterns # AST-based scan for any/as-any/@ts-ignore/empty-catch
+pnpm quality:review             # Both of the above in sequence
+```
+
+Run `pnpm quality:review` as a pre-commit check in addition to `pnpm validate`.
