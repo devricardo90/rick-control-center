@@ -39,7 +39,7 @@ export default createConfigForNuxt({
     name: 'rick/structure',
     files: ['**/*.ts', '**/*.tsx', '**/*.vue'],
     rules: {
-      complexity: ['error', { max: 10 }],
+      'complexity': ['error', { max: 10 }],
       'max-depth': ['error', { max: 3 }],
       'max-params': ['error', { max: 4 }],
       'max-lines-per-function': ['warn', { max: 60, skipComments: true, skipBlankLines: true }],
