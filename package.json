@@ -13,7 +13,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "validate": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "validate": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "quality:types": "pnpm typecheck",
+    "quality:forbidden-patterns": "node scripts/check-patterns.mjs",
+    "quality:review": "pnpm quality:types && pnpm quality:forbidden-patterns"
   },
   "devDependencies": {
     "@nuxt/eslint-config": "^0.7.0",
