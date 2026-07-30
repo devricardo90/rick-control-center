@@ -50,7 +50,7 @@ for (const filePath of SCAN_DIRS.flatMap(collectSourceFiles)) {
 
   for (const unit of sourceUnits(filePath, fileSource)) {
     const sf = ts.createSourceFile(filePath, unit.source, ts.ScriptTarget.ESNext, true, unit.kind)
-    const location = pos => {
+    const location = (pos) => {
       const lc = sf.getLineAndCharacterOfPosition(pos)
       return { line: lc.line + 1 + unit.lineOffset, col: lc.character + 1 }
     }
