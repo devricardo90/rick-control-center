@@ -38,8 +38,8 @@ const globalForPrisma = globalThis as typeof globalThis & {
   __rickPrisma?: PrismaClient
 }
 
-export const prisma: PrismaClient =
-  globalForPrisma['__rickPrisma'] ?? createPrismaClient()
+export const prisma: PrismaClient
+  = globalForPrisma['__rickPrisma'] ?? createPrismaClient()
 
 if (process.env['NODE_ENV'] !== 'production') {
   globalForPrisma['__rickPrisma'] = prisma
