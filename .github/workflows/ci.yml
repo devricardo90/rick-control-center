@@ -19,6 +19,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # NDERCC-5: integration tests prove uniqueness and foreign-key
+    # constraints against a real PostgreSQL instance — mocks cannot prove
+    # database-level constraints, so CI now runs one. Credentials below are
+    # local-only, non-secret placeholders (see docker-compose.yml).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rick
+          POSTGRES_PASSWORD: rick
+          POSTGRES_DB: rick_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rick -d rick_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://rick:rick@localhost:5432/rick_dev
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,10 +59,9 @@ jobs:
 
       - name: Generate Prisma client
         run: pnpm db:generate
-        env:
-          # Non-secret placeholder: `prisma generate` only needs a resolvable
-          # connection string, it does not connect to a live database.
-          DATABASE_URL: postgresql://rick:rick@localhost:5432/rick_dev
+
+      - name: Apply database migrations
+        run: pnpm db:migrate:deploy
 
       - name: Lint
         run: pnpm lint

@@ -1,6 +1,11 @@
 // Prisma schema for RICK Control Center
-// Persistence foundation — sprint 0, NDERCC-4
-// No domain models yet — a minimal HealthCheck record proves the migration pipeline.
+// Persistence foundation — sprint 0.
+// NDERCC-5: first canonical domain slice — Project and IntegrationConnection.
+//
+// The NDERCC-4 `HealthCheck` proof-of-pipeline table is dropped by the
+// NDERCC-5 migration (see prisma/migrations/*_initial_domain_model). The
+// NDERCC-4 migration itself is left untouched — this is a new, additive
+// migration, not an edit of migration history.
 
 generator client {
   provider = "prisma-client-js"
@@ -10,11 +15,95 @@ datasource db {
   provider = "postgresql"
 }
 
-// Minimal table used only to prove the migration pipeline.
-// Domain models (Project, User, Workspace) will be added in NDERCC-5.
-model HealthCheck {
-  id        Int      @id @default(autoincrement())
-  checkedAt DateTime @default(now())
+// RIC-006: initial, non-speculative project lifecycle. `archivedAt` carries
+// the logical-archival timestamp; ARCHIVED mirrors it for direct filtering.
+enum ProjectStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
 
-  @@map("health_checks")
+  @@map("project_status")
+}
+
+// RIC-011 execution modes, reused as the project-level default policy.
+enum AutonomyPolicy {
+  SUPERVISED
+  CONTROLLED_AUTONOMOUS
+
+  @@map("autonomy_policy")
+}
+
+// The only two branch policies named in the Development Protocol
+// (docs/12-development-protocol.md §7): dedicated branch per task (default),
+// or direct commits where policy explicitly allows it.
+enum BranchPolicy {
+  BRANCH_PER_TASK
+  DIRECT_COMMIT
+
+  @@map("branch_policy")
+}
+
+// Required initial providers per NDERCC-5 scope.
+enum IntegrationProvider {
+  GITHUB
+  JIRA
+  GOOGLE_DRIVE
+  AGENT_RUNTIME
+
+  @@map("integration_provider")
+}
+
+// Verification lifecycle for an IntegrationConnection. PENDING until first
+// verified; ERROR/DISCONNECTED are distinct so a failed check is
+// distinguishable from a deliberate disconnect.
+enum IntegrationConnectionStatus {
+  PENDING
+  CONNECTED
+  ERROR
+  DISCONNECTED
+
+  @@map("integration_connection_status")
+}
+
+// Root isolation aggregate. Every operational entity belongs to a Project.
+model Project {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key                 String    @unique
+  name                String
+  description         String?
+  status              ProjectStatus  @default(ACTIVE)
+  autonomyPolicy      AutonomyPolicy @default(CONTROLLED_AUTONOMOUS) @map("autonomy_policy")
+  defaultBranchPolicy BranchPolicy   @default(BRANCH_PER_TASK) @map("default_branch_policy")
+  workspacePath       String?   @map("workspace_path")
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt           DateTime  @updatedAt @db.Timestamptz(3) @map("updated_at")
+  archivedAt          DateTime? @db.Timestamptz(3) @map("archived_at")
+
+  integrationConnections IntegrationConnection[]
+
+  @@map("projects")
+}
+
+// First project-owned integration entity. `configurationEncrypted` is an
+// opaque, already-encrypted payload — this package never encrypts, decrypts,
+// or inspects it, and no plaintext credential field exists on this model.
+model IntegrationConnection {
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId               String    @map("project_id") @db.Uuid
+  provider                IntegrationProvider
+  displayName             String    @map("display_name")
+  status                  IntegrationConnectionStatus @default(PENDING)
+  externalAccountId       String?   @map("external_account_id")
+  configurationEncrypted  String?   @map("configuration_encrypted")
+  lastVerifiedAt          DateTime? @db.Timestamptz(3) @map("last_verified_at")
+  createdAt               DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt               DateTime  @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  // Restrict, not cascade: a Project with connections cannot be deleted
+  // without first removing them, per NDERCC-5 scope (prefer blocking
+  // destructive deletion over silently cascading it away).
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([projectId])
+  @@map("integration_connections")
 }
