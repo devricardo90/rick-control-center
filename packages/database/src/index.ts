@@ -6,6 +6,7 @@
  *
  * NDERCC-4: persistence foundation — sprint 0.
  * NDERCC-5: initial domain and persistence model.
+ * NDERCC-6: single-user authentication.
  */
 export { prisma } from './client.js'
 export type { DatabaseHealthResult } from './health.js'
@@ -32,3 +33,17 @@ export {
   createIntegrationConnection,
   listIntegrationConnectionsByProject,
 } from './integration-connection.js'
+
+export type { SafeOperator, UpsertPrimaryOperatorInput } from './operator.js'
+export { getPrimaryOperator, upsertPrimaryOperator } from './operator.js'
+
+export type { CreatedSession, SafeAuthSession } from './auth-session.js'
+export {
+  createSession,
+  revokeAllSessionsForOperator,
+  revokeSessionByToken,
+  validateSession,
+} from './auth-session.js'
+
+export type { AuthenticationResult, LoginCredentials } from './authenticate.js'
+export { authenticateOperator } from './authenticate.js'

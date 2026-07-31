@@ -107,3 +107,46 @@ model IntegrationConnection {
   @@index([projectId])
   @@map("integration_connections")
 }
+
+// The installation's single primary operator. `singleton` is always `true`
+// and unique — a standard Postgres singleton-table pattern that makes a
+// second operator row a database-level uniqueness violation, not just an
+// application-level rule. Provisioned only via the administrative bootstrap
+// command (packages/database/src/cli/bootstrap-operator.ts); no application
+// code creates or updates rows in this table.
+model Operator {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  singleton    Boolean  @unique @default(true)
+  username     String   @unique
+  // Argon2id PHC-format hash string (algorithm + parameters + salt + hash).
+  // Never a plaintext password.
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  sessions AuthSession[]
+
+  @@map("operators")
+}
+
+// A server-side session for the primary operator. The raw session token is
+// never stored — only a SHA-256 digest, looked up on every request. Absolute
+// 24-hour expiration via `expiresAt`; `revokedAt` marks logout or a
+// password-change-triggered revocation.
+model AuthSession {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  operatorId   String    @map("operator_id") @db.Uuid
+  // SHA-256 hex digest of the raw opaque session token.
+  tokenDigest  String    @unique @map("token_digest")
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
+  expiresAt    DateTime  @db.Timestamptz(3) @map("expires_at")
+  revokedAt    DateTime? @db.Timestamptz(3) @map("revoked_at")
+
+  // Cascade, not restrict: sessions are ephemeral security artifacts owned
+  // by the operator, unlike Project/IntegrationConnection business records —
+  // there is no data-loss risk in removing them alongside their operator.
+  operator Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([operatorId])
+  @@map("auth_sessions")
+}

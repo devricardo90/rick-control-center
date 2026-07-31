@@ -17,6 +17,7 @@
     "db:generate": "pnpm --filter @rick/database db:generate",
     "db:migrate": "pnpm --filter @rick/database db:migrate",
     "db:migrate:deploy": "pnpm --filter @rick/database db:migrate:deploy",
+    "auth:bootstrap": "pnpm --filter @rick/database bootstrap:operator",
     "quality:types": "pnpm typecheck",
     "quality:forbidden-patterns": "node scripts/check-patterns.mjs",
     "quality:review": "pnpm quality:types && pnpm quality:forbidden-patterns"

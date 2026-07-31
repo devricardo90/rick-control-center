@@ -108,16 +108,84 @@ Invalid references and duplicate keys are surfaced as typed errors
 (`ProjectNotFoundError`, `DuplicateProjectKeyError`) rather than raw Prisma
 errors — see `src/errors.ts`.
 
+## Authentication (single primary operator)
+
+RICK Control Center supports exactly one operator per installation, with
+login-and-password authentication and server-enforced sessions
+(NDERCC-6 / RIC-S0-05).
+
+### Provisioning the operator
+
+There is no registration page. The operator is created or updated only
+through the interactive bootstrap command, which reads the password from
+the terminal without echoing it and never logs or persists it in plaintext:
+
+```bash
+pnpm auth:bootstrap
+```
+
+This is idempotent: running it again updates the same canonical operator
+(username and/or password) rather than creating a second one — a second
+operator is rejected at the database level even if some future code tried
+to bypass this command. Changing the password revokes every existing
+session.
+
+### Password hashing
+
+Passwords are hashed with **Argon2id** via `@node-rs/argon2`, using the
+OWASP-recommended baseline profile, set explicitly in
+`src/auth/password.ts`:
+
+| Parameter | Value |
+|---|---|
+| Memory cost | 19456 KiB (19 MiB) |
+| Time cost (iterations) | 2 |
+| Parallelism | 1 |
+
+A precomputed hash of a fixed, explicitly artificial string is used to keep
+login timing similar for a nonexistent username vs. a wrong password
+(`DUMMY_PASSWORD_HASH`) — it can never authenticate a real operator.
+
+### Sessions
+
+- The raw session token is a 32-byte cryptographically random value
+  (`node:crypto` `randomBytes`), returned to the browser **only** via an
+  `HttpOnly` cookie (`rick_session`). It is never returned in a JSON body.
+- PostgreSQL stores only its SHA-256 digest (`AuthSession.tokenDigest`) —
+  the raw token cannot be recovered from the database.
+- Cookie policy: `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` when
+  `NODE_ENV=production` (`apps/web/server/utils/auth-cookie.ts`).
+- Sessions expire 24 hours after creation (absolute — no refresh, no
+  sliding expiration, no remember-me).
+- Logout (`POST /api/auth/logout`) revokes the session server-side and
+  clears the cookie.
+
+### Route protection
+
+`apps/web/server/middleware/auth.ts` runs before every request. Public
+paths (`/login`, `/api/auth/login`, `/api/auth/logout`, framework assets,
+`/favicon.ico`, `/robots.txt`) pass through; everything else requires a
+valid session — unauthenticated page requests redirect to `/login`,
+unauthenticated API requests receive `401`. This is enforced entirely
+server-side; there is no client-side-only route guard.
+
 ## Running tests
 
-Unit tests (`health.test.ts`) run against a mocked client. The domain
-persistence tests (`project.test.ts`, `integration-connection.test.ts`) are
-**integration tests that require a real, running PostgreSQL instance** with
-`DATABASE_URL` set — database-enforced constraints (key uniqueness,
-foreign-key integrity, delete-restrict behavior) cannot be proven with
+Unit tests (`health.test.ts`, `auth/password.test.ts`,
+`auth/session-token.test.ts`) run against mocks or pure functions. The
+domain persistence tests (`project.test.ts`, `integration-connection.test.ts`,
+`authenticate.test.ts`) are **integration tests that require a real,
+running PostgreSQL instance** with `DATABASE_URL` set —
+database-enforced constraints (key uniqueness, foreign-key integrity,
+delete-restrict behavior, session expiry/revocation) cannot be proven with
 mocks. Start Docker Compose and apply migrations before running
 `pnpm test`; CI provisions its own disposable PostgreSQL service for the
 same reason (see `.github/workflows/ci.yml`).
+
+`authenticate.test.ts` covers `Operator` and `AuthSession` together,
+deliberately in one file: unlike `Project`, `Operator` is a singleton
+table, so its tests cannot use unique-key-per-test isolation and rely
+instead on vitest's default sequential execution within a single file.
 
 ## Configuration notes
 
