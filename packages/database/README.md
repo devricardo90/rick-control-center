@@ -1,8 +1,8 @@
 # @rick/database
 
 PostgreSQL persistence foundation for RICK Control Center, built on Prisma 7.
-Sprint 0 — NDERCC-4 / RIC-S0-03. No domain models yet; see NDERCC-5 for
-`Project` and `IntegrationConnection`.
+Sprint 0 — NDERCC-4 / RIC-S0-03 (PostgreSQL + Prisma foundation) and
+NDERCC-5 / RIC-S0-04 (initial domain and persistence model).
 
 ## Prerequisites
 
@@ -57,6 +57,67 @@ Unit tests (`pnpm --filter @rick/database test`) exercise this logic against
 a mocked client. To verify against a real database, start Docker Compose,
 generate the client, apply migrations, then call `checkDatabaseHealth` from
 any script or the Nuxt server context with `DATABASE_URL` set.
+
+## Domain models
+
+### Project
+
+The root isolation aggregate — every operational entity belongs to a
+`Project`. Key fields: `key` (globally unique, database-enforced), `status`
+(`ACTIVE` / `PAUSED` / `ARCHIVED`), `autonomyPolicy`
+(`SUPERVISED` / `CONTROLLED_AUTONOMOUS`), `defaultBranchPolicy`
+(`BRANCH_PER_TASK` / `DIRECT_COMMIT`), and `archivedAt`. Archival is
+**logical**: a `Project` is archived by setting `status: ARCHIVED` and
+`archivedAt`, never by deleting the row.
+
+### IntegrationConnection
+
+A project-owned integration entity for `GITHUB`, `JIRA`, `GOOGLE_DRIVE` or
+`AGENT_RUNTIME`. Every connection has a mandatory `projectId` foreign key.
+Deleting a `Project` that still has connections is **restricted** at the
+database level (`ON DELETE RESTRICT`) — connections must be removed first.
+This is a deliberate choice: destructive project deletion should not
+silently cascade away integration history.
+
+`status` tracks verification lifecycle: `PENDING` (never verified),
+`CONNECTED`, `ERROR`, or `DISCONNECTED`.
+
+**Security:** `configurationEncrypted` is an opaque, already-encrypted
+payload. Nothing in this package encrypts, decrypts, inspects, or logs it —
+encryption is out of scope for this task. No plaintext token, password, or
+credential field exists on this model; do not add one without an approved
+encryption design.
+
+## Domain persistence surface
+
+`@rick/database` exports a minimal, typed, framework-independent surface
+over the models above (`src/project.ts`, `src/integration-connection.ts`):
+
+```ts
+import { prisma, createProject, findProjectByKey, createIntegrationConnection } from '@rick/database'
+
+const project = await createProject(prisma, { key: 'rick-core', name: 'RICK Core' })
+await createIntegrationConnection(prisma, {
+  projectId: project.id,
+  provider: 'GITHUB',
+  displayName: 'Primary GitHub',
+})
+```
+
+Invalid references and duplicate keys are surfaced as typed errors
+(`ProjectNotFoundError`, `DuplicateProjectKeyError`) rather than raw Prisma
+errors — see `src/errors.ts`.
+
+## Running tests
+
+Unit tests (`health.test.ts`) run against a mocked client. The domain
+persistence tests (`project.test.ts`, `integration-connection.test.ts`) are
+**integration tests that require a real, running PostgreSQL instance** with
+`DATABASE_URL` set — database-enforced constraints (key uniqueness,
+foreign-key integrity, delete-restrict behavior) cannot be proven with
+mocks. Start Docker Compose and apply migrations before running
+`pnpm test`; CI provisions its own disposable PostgreSQL service for the
+same reason (see `.github/workflows/ci.yml`).
 
 ## Configuration notes
 
