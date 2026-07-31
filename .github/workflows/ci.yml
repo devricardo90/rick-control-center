@@ -35,6 +35,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate Prisma client
+        run: pnpm db:generate
+        env:
+          # Non-secret placeholder: `prisma generate` only needs a resolvable
+          # connection string, it does not connect to a live database.
+          DATABASE_URL: postgresql://rick:rick@localhost:5432/rick_dev
+
       - name: Lint
         run: pnpm lint
 

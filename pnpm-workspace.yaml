@@ -1,3 +1,11 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+
+# Allow lifecycle scripts for packages that need them (e.g. Prisma engine download).
+# NDERCC-4: added for @prisma/engines and prisma post-install steps.
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - 'prisma'
+  - 'esbuild'
+  - 'unrs-resolver'
