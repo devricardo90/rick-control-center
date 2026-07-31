@@ -10,6 +10,7 @@ const SCAN_DIRS = [
   join(ROOT, 'packages', 'shared', 'src'),
   join(ROOT, 'packages', 'domain', 'src'),
   join(ROOT, 'packages', 'application', 'src'),
+  join(ROOT, 'packages', 'database', 'src'),
   join(ROOT, 'apps', 'web'),
 ]
 
