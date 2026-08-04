@@ -28,6 +28,12 @@ export interface UpsertPrimaryOperatorInput {
  * same row via the `singleton` unique constraint — this is the only
  * function in the codebase that is allowed to write `Operator` rows, and it
  * can never produce a second one (the database rejects it).
+ *
+ * Does NOT revoke sessions. Administrative credential changes (bootstrap,
+ * password rotation) must go through
+ * `upsertPrimaryOperatorAndRevokeSessions` instead, which does both in one
+ * transaction — this function alone is only safe for initial provisioning
+ * or test setup where no pre-existing session needs to be invalidated.
  */
 export async function upsertPrimaryOperator(
   client: PrismaClient,
@@ -38,6 +44,37 @@ export async function upsertPrimaryOperator(
     create: { singleton: true, username: input.username, passwordHash: input.passwordHash },
     update: { username: input.username, passwordHash: input.passwordHash },
     select: SAFE_OPERATOR_SELECT,
+  })
+}
+
+/**
+ * Upsert the canonical operator and revoke all of its existing sessions in
+ * a single Prisma transaction. This is the only credential-change path
+ * that satisfies the contract requirement that changing the operator
+ * password revokes every previously issued session: running the upsert
+ * and the revocation as two independent calls (as the bootstrap CLI did
+ * before NDERCC-6 review 4855039184) leaves a window where a completed
+ * password change coexists with still-valid old sessions if the second
+ * call fails.
+ */
+export async function upsertPrimaryOperatorAndRevokeSessions(
+  client: PrismaClient,
+  input: UpsertPrimaryOperatorInput,
+): Promise<SafeOperator> {
+  return client.$transaction(async (tx) => {
+    const operator = await tx.operator.upsert({
+      where: { singleton: true },
+      create: { singleton: true, username: input.username, passwordHash: input.passwordHash },
+      update: { username: input.username, passwordHash: input.passwordHash },
+      select: SAFE_OPERATOR_SELECT,
+    })
+
+    await tx.authSession.updateMany({
+      where: { operatorId: operator.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    })
+
+    return operator
   })
 }
 

@@ -35,7 +35,11 @@ export {
 } from './integration-connection.js'
 
 export type { SafeOperator, UpsertPrimaryOperatorInput } from './operator.js'
-export { getPrimaryOperator, upsertPrimaryOperator } from './operator.js'
+export {
+  getPrimaryOperator,
+  upsertPrimaryOperator,
+  upsertPrimaryOperatorAndRevokeSessions,
+} from './operator.js'
 
 export type { CreatedSession, SafeAuthSession } from './auth-session.js'
 export {

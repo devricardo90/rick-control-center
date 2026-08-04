@@ -4,10 +4,11 @@
  * installation's single primary operator.
  *
  * Idempotent — always targets the same canonical row (see
- * `upsertPrimaryOperator`), so re-running it changes the existing
- * operator's username/password rather than creating a second one.
- * Revokes every existing session afterward, since a password change must
- * invalidate previously issued sessions.
+ * `upsertPrimaryOperatorAndRevokeSessions`), so re-running it changes the
+ * existing operator's username/password rather than creating a second one.
+ * The credential update and the revocation of every existing session run
+ * in a single database transaction, since a password change must
+ * invalidate previously issued sessions atomically.
  *
  * The password is read from the terminal without echoing it and is never
  * logged or persisted — only its Argon2id hash is stored.
@@ -18,9 +19,8 @@
  */
 import { createInterface } from 'node:readline'
 import { hashPassword } from '../auth/password.js'
-import { revokeAllSessionsForOperator } from '../auth-session.js'
 import { prisma } from '../client.js'
-import { upsertPrimaryOperator } from '../operator.js'
+import { upsertPrimaryOperatorAndRevokeSessions } from '../operator.js'
 
 const MIN_PASSWORD_LENGTH = 12
 
@@ -114,8 +114,7 @@ async function main(): Promise<void> {
 
   const password = await readNewPassword()
   const passwordHash = await hashPassword(password)
-  const operator = await upsertPrimaryOperator(prisma, { username, passwordHash })
-  await revokeAllSessionsForOperator(prisma, operator.id)
+  const operator = await upsertPrimaryOperatorAndRevokeSessions(prisma, { username, passwordHash })
 
   console.log(`Operator '${operator.username}' provisioned. All existing sessions were revoked.`)
 }

@@ -23,7 +23,11 @@ import {
   validateSession,
 } from './auth-session.js'
 import { authenticateOperator } from './authenticate.js'
-import { getPrimaryOperator, upsertPrimaryOperator } from './operator.js'
+import {
+  getPrimaryOperator,
+  upsertPrimaryOperator,
+  upsertPrimaryOperatorAndRevokeSessions,
+} from './operator.js'
 import { createTestClient, uniqueSlug } from './test-support.js'
 
 const client = createTestClient()
@@ -93,6 +97,38 @@ describe('Operator persistence', () => {
         && err.message.includes('23514')
         && err.message.includes('operators_singleton_check'),
     )
+  })
+})
+
+describe('upsertPrimaryOperatorAndRevokeSessions (atomic password change)', () => {
+  it('revokes the previous session and rotates credentials in one transaction', async () => {
+    const username = uniqueSlug('operator')
+    await provisionOperator(username, 'original-password-value')
+
+    const loggedIn = await authenticateOperator(client, { username, password: 'original-password-value' })
+    expect(loggedIn.ok).toBe(true)
+    if (!loggedIn.ok) {
+      return
+    }
+    expect(await validateSession(client, loggedIn.rawToken)).not.toBeNull()
+
+    const newPasswordHash = await hashPassword('rotated-password-value')
+    const updated = await upsertPrimaryOperatorAndRevokeSessions(client, {
+      username,
+      passwordHash: newPasswordHash,
+    })
+
+    expect(updated.id).toBe(loggedIn.operatorId)
+    expect(Object.keys(updated)).not.toContain('passwordHash')
+    expect(JSON.stringify(updated)).not.toContain('passwordHash')
+
+    expect(await validateSession(client, loggedIn.rawToken)).toBeNull()
+
+    const withOldPassword = await authenticateOperator(client, { username, password: 'original-password-value' })
+    expect(withOldPassword).toEqual({ ok: false })
+
+    const withNewPassword = await authenticateOperator(client, { username, password: 'rotated-password-value' })
+    expect(withNewPassword.ok).toBe(true)
   })
 })
 
