@@ -20,3 +20,27 @@ export class DuplicateProjectKeyError extends Error {
     this.name = 'DuplicateProjectKeyError'
   }
 }
+
+/**
+ * A lifecycle action was requested that does not apply from the project's
+ * current status (including any action requested against an ARCHIVED
+ * project, which is terminal — NDERCC-10).
+ */
+export class InvalidProjectTransitionError extends Error {
+  constructor(
+    public readonly projectId: string,
+    public readonly fromStatus: string,
+    public readonly toStatus: string,
+  ) {
+    super(`Invalid project lifecycle transition for ${projectId}: ${fromStatus} -> ${toStatus}`)
+    this.name = 'InvalidProjectTransitionError'
+  }
+}
+
+/** An archived project's settings were requested to change — archived is terminal and read-only (NDERCC-10). */
+export class ArchivedProjectReadOnlyError extends Error {
+  constructor(public readonly projectId: string) {
+    super(`Archived project is read-only: ${projectId}`)
+    this.name = 'ArchivedProjectReadOnlyError'
+  }
+}

@@ -12,9 +12,20 @@ export { prisma } from './client.js'
 export type { DatabaseHealthResult } from './health.js'
 export { checkDatabaseHealth } from './health.js'
 
-export { DuplicateProjectKeyError, ProjectNotFoundError } from './errors.js'
+export {
+  ArchivedProjectReadOnlyError,
+  DuplicateProjectKeyError,
+  InvalidProjectTransitionError,
+  ProjectNotFoundError,
+} from './errors.js'
 
-export type { CreateProjectInput, Project, ProjectStatus } from './project.js'
+export type {
+  CreateProjectInput,
+  Project,
+  ProjectLifecycleAction,
+  ProjectStatus,
+  UpdateProjectSettingsInput,
+} from './project.js'
 export {
   AutonomyPolicy,
   BranchPolicy,
@@ -22,6 +33,8 @@ export {
   findProjectById,
   findProjectByKey,
   listProjects,
+  transitionProjectLifecycle,
+  updateProjectSettings,
 } from './project.js'
 
 export type {
