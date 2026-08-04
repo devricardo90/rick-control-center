@@ -70,6 +70,30 @@ describe('Operator persistence', () => {
       (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002',
     )
   })
+
+  it('rejects a second operator row with singleton = false at the database level', async () => {
+    await provisionOperator(uniqueSlug('operator'), 'existing-operator-password')
+
+    // A row with singleton = false does not collide with the existing
+    // singleton = true row under the plain UNIQUE index on `singleton`, so
+    // this must be rejected by the `operators_singleton_check` CHECK
+    // constraint instead — a raw query is required because a `false` value
+    // here is a constraint-violation probe, not a legitimate write the
+    // typed Prisma API is meant to express.
+    await expect(
+      client.$executeRaw`INSERT INTO "operators" (singleton, username, password_hash, updated_at)
+        VALUES (false, ${uniqueSlug('operator-false')}, 'irrelevant', now())`,
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof Prisma.PrismaClientKnownRequestError
+        && err.code === 'P2010'
+        // 23514 is the Postgres SQLSTATE for check_violation — this proves
+        // the CHECK constraint specifically rejected the row, not some
+        // other raw-query failure that would also report P2010.
+        && err.message.includes('23514')
+        && err.message.includes('operators_singleton_check'),
+    )
+  })
 })
 
 describe('AuthSession persistence', () => {

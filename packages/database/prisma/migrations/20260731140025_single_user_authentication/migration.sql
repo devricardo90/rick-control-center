@@ -25,6 +25,13 @@ CREATE TABLE "auth_sessions" (
 -- CreateIndex
 CREATE UNIQUE INDEX "operators_singleton_key" ON "operators"("singleton");
 
+-- AddCheckConstraint
+-- The UNIQUE index above only prevents two rows with the SAME boolean value
+-- (e.g. two rows with singleton = true). It does not prevent a second row
+-- with singleton = false, which would violate the single-operator invariant.
+-- This CHECK constraint closes that gap by requiring every row to be true.
+ALTER TABLE "operators" ADD CONSTRAINT "operators_singleton_check" CHECK ("singleton" = true);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "operators_username_key" ON "operators"("username");
 

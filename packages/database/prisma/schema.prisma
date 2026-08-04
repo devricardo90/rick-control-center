@@ -108,12 +108,25 @@ model IntegrationConnection {
   @@map("integration_connections")
 }
 
-// The installation's single primary operator. `singleton` is always `true`
-// and unique — a standard Postgres singleton-table pattern that makes a
-// second operator row a database-level uniqueness violation, not just an
-// application-level rule. Provisioned only via the administrative bootstrap
-// command (packages/database/src/cli/bootstrap-operator.ts); no application
-// code creates or updates rows in this table.
+// The installation's single primary operator. `singleton` is always `true`.
+// Two constraints together make a second operator row impossible at the
+// database level, not just by application-level rule:
+//   - UNIQUE on `singleton` blocks a second row with the SAME value
+//     (e.g. two rows with singleton = true);
+//   - CHECK `operators_singleton_check` (singleton = true) blocks
+//     singleton = false entirely, closing the gap the UNIQUE index alone
+//     leaves open (a row with singleton = false would not collide with
+//     the true row under a plain UNIQUE index).
+// The CHECK constraint has no Prisma schema representation: `@@check` is
+// not a recognized attribute in this Prisma version (7.9.1) — confirmed by
+// `prisma generate` rejecting it with P1012. It exists only in
+// prisma/migrations/20260731140025_single_user_authentication/migration.sql.
+// Any future `prisma migrate dev` run for this table must NOT let Prisma's
+// schema-diff drop `operators_singleton_check` as unrepresented drift —
+// review the generated SQL before applying.
+// Provisioned only via the administrative bootstrap command
+// (packages/database/src/cli/bootstrap-operator.ts); no application code
+// creates or updates rows in this table.
 model Operator {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   singleton    Boolean  @unique @default(true)
