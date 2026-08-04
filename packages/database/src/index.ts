@@ -14,14 +14,15 @@ export { checkDatabaseHealth } from './health.js'
 
 export { DuplicateProjectKeyError, ProjectNotFoundError } from './errors.js'
 
-export type {
+export type { CreateProjectInput, Project, ProjectStatus } from './project.js'
+export {
   AutonomyPolicy,
   BranchPolicy,
-  CreateProjectInput,
-  Project,
-  ProjectStatus,
+  createProject,
+  findProjectById,
+  findProjectByKey,
+  listProjects,
 } from './project.js'
-export { createProject, findProjectById, findProjectByKey, listProjects } from './project.js'
 
 export type {
   CreateIntegrationConnectionInput,

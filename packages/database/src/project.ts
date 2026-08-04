@@ -7,17 +7,15 @@
  *
  * NDERCC-5: initial domain and persistence model.
  */
-import { Prisma } from '@prisma/client'
-import type {
-  AutonomyPolicy,
-  BranchPolicy,
-  PrismaClient,
-  Project,
-  ProjectStatus,
-} from '@prisma/client'
+import { AutonomyPolicy, BranchPolicy, Prisma } from '@prisma/client'
+import type { PrismaClient, Project, ProjectStatus } from '@prisma/client'
 import { DuplicateProjectKeyError } from './errors.js'
 
-export type { Project, ProjectStatus, AutonomyPolicy, BranchPolicy }
+export type { Project, ProjectStatus }
+// Exported as values, not just types: this is the single source of truth
+// consumers (e.g. the apps/web HTTP boundary) validate enum input against,
+// so a validator can never drift from the actual persisted enum set.
+export { AutonomyPolicy, BranchPolicy }
 
 export interface CreateProjectInput {
   key: string
