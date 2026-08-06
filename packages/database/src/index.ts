@@ -14,8 +14,11 @@ export { checkDatabaseHealth } from './health.js'
 
 export {
   ArchivedProjectReadOnlyError,
+  DocumentSourceNotFoundError,
+  DuplicateDocumentSourceError,
   DuplicateProjectKeyError,
   IntegrationConnectionNotFoundError,
+  InvalidDocumentSourceInputError,
   InvalidProjectTransitionError,
   ProjectNotFoundError,
 } from './errors.js'
@@ -71,3 +74,23 @@ export {
 
 export type { AuthenticationResult, LoginCredentials } from './authenticate.js'
 export { authenticateOperator } from './authenticate.js'
+
+export type {
+  CreateDocumentSourceInput,
+  DocumentSource,
+  RecordDocumentSourceSyncSuccessInput,
+  UpdateDocumentSourceRegistryInput,
+} from './document-source.js'
+export {
+  createDocumentSource,
+  DocumentApprovalStatus,
+  DocumentProvider,
+  DocumentSyncStatus,
+  DocumentType,
+  findDocumentSourceForProject,
+  listDocumentSourcesForProject,
+  markDocumentSourceSyncError,
+  markDocumentSourceSyncStale,
+  recordDocumentSourceSyncSuccess,
+  updateDocumentSourceRegistry,
+} from './document-source.js'

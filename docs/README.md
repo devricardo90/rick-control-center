@@ -37,6 +37,7 @@ never itself authorizes execution outside an approved Execution Contract
 | Doc | Covers |
 |---|---|
 | [`decisions/DEC-RIC-001-github-credential-boundary.md`](decisions/DEC-RIC-001-github-credential-boundary.md) | Server-only, optional `GITHUB_TOKEN`; no credential persistence or browser/agent exposure (NDERCC-11) |
+| [`decisions/DEC-RIC-002-document-source-persistence-boundary.md`](decisions/DEC-RIC-002-document-source-persistence-boundary.md) | Project-owned `DocumentSource` registry; separated approval/sync status; no content/version storage yet (NDERCC-12) |
 
 ## Execution contracts
 

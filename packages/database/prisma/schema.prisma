@@ -65,6 +65,60 @@ enum IntegrationConnectionStatus {
   @@map("integration_connection_status")
 }
 
+// RIC-006 / DEC-RIC-002: the only Google Drive-era provider authorized for
+// NDERCC-12. Adding another document provider requires a later migration
+// and a new decision.
+enum DocumentProvider {
+  GOOGLE_DRIVE
+
+  @@map("document_provider")
+}
+
+// The approved strategic document classes (DEC-RIC-002). Not a free-form
+// string: a fixed, reviewed enum keeps the registry queryable and prevents
+// silent drift of what "counts" as a strategic document.
+enum DocumentType {
+  VISION
+  PRD
+  ARCHITECTURE
+  ROADMAP
+  DESIGN_SYSTEM
+  DATA_MODEL
+  STATE_MACHINE
+  RISK_ENGINE
+  MVP
+  BACKLOG
+  EXECUTION_CONTRACT_SPEC
+  DEVELOPMENT_PROTOCOL
+
+  @@map("document_type")
+}
+
+// Editorial/governance state — independent of synchronization state
+// (DEC-RIC-002 invariant: approval and sync must never be conflated into
+// one combined status).
+enum DocumentApprovalStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+  SUPERSEDED
+
+  @@map("document_approval_status")
+}
+
+// Synchronization lifecycle with the external provider. PENDING until the
+// first successful sync; STALE/ERROR are distinct so "known outdated" is
+// distinguishable from "last sync attempt failed" — both preserve the last
+// valid synchronized snapshot (revision/checksum/metadataJson/lastSyncedAt).
+enum DocumentSyncStatus {
+  PENDING
+  SYNCED
+  STALE
+  ERROR
+
+  @@map("document_sync_status")
+}
+
 // Root isolation aggregate. Every operational entity belongs to a Project.
 model Project {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -80,6 +134,7 @@ model Project {
   archivedAt          DateTime? @db.Timestamptz(3) @map("archived_at")
 
   integrationConnections IntegrationConnection[]
+  documentSources        DocumentSource[]
 
   @@map("projects")
 }
@@ -118,6 +173,46 @@ model IntegrationConnection {
   @@unique([projectId, provider, externalAccountId], map: "integration_connections_project_provider_external_account_key")
   @@index([projectId])
   @@map("integration_connections")
+}
+
+// Project-owned strategic document registry entry (NDERCC-12 / DEC-RIC-002).
+// Persistence and provenance only — no document body content, snapshot, or
+// version history exists here; that is explicitly deferred to a future,
+// separately-decided NDERCC-13 slice.
+model DocumentSource {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String                 @map("project_id") @db.Uuid
+  provider       DocumentProvider
+  externalFileId String                 @map("external_file_id")
+  documentType   DocumentType           @map("document_type")
+  title          String
+  url            String
+  revision       String?
+  approvalStatus DocumentApprovalStatus @default(DRAFT) @map("approval_status")
+  syncStatus     DocumentSyncStatus     @default(PENDING) @map("sync_status")
+  checksum       String?
+  lastSyncedAt   DateTime?              @db.Timestamptz(3) @map("last_synced_at")
+  // Non-secret provider metadata only — never document body content, a raw
+  // provider response, or an HTTP header/credential (DEC-RIC-002). The
+  // typed persistence surface in src/document-source.ts recursively rejects
+  // credential-shaped keys before this column is ever written.
+  metadataJson   Json?                  @map("metadata_json")
+  createdAt      DateTime               @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt      DateTime               @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  // Restrict, not cascade: strategic document provenance must never be
+  // silently lost by deleting its owning Project (DEC-RIC-002).
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  // The same provider file may be registered only once per project, but
+  // independently in a different project — and a project may register more
+  // than one source of the same documentType (approval policy, not a
+  // uniqueness rule, decides which is authoritative), so no uniqueness on
+  // (projectId, documentType) is added.
+  @@unique([projectId, provider, externalFileId], map: "document_sources_project_provider_external_file_key")
+  @@index([projectId])
+  @@index([projectId, documentType])
+  @@map("document_sources")
 }
 
 // The installation's single primary operator. `singleton` is always `true`.

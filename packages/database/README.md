@@ -88,6 +88,34 @@ encryption is out of scope for this task. No plaintext token, password, or
 credential field exists on this model; do not add one without an approved
 encryption design.
 
+### DocumentSource
+
+A project-owned strategic document registry entry (NDERCC-12 / DEC-RIC-002).
+Tracks provenance (`provider` — currently only `GOOGLE_DRIVE` —,
+`externalFileId`), classification (`documentType`), and two **independent**
+status dimensions: `approvalStatus` (`DRAFT` / `APPROVED` / `REJECTED` /
+`SUPERSEDED`) and `syncStatus` (`PENDING` / `SYNCED` / `STALE` / `ERROR`).
+The same external file may be registered only once per project
+(`(projectId, provider, externalFileId)` is unique), but independently in a
+different project, and a project may register more than one source of the
+same `documentType`.
+
+A synchronization failure or a `STALE` marking never overwrites the last
+successful `revision`, `checksum`, `metadataJson`, or `lastSyncedAt` — only
+`syncStatus` changes. There is no physical delete operation.
+
+**This is persistence and provenance only.** NDERCC-12 does not call Google
+Drive, does not import or parse document body content, and does not
+generate a checksum from content — it validates and stores a
+caller-supplied checksum shape only. Document content, versions, and
+snapshots are explicitly deferred to a future, separately-decided task
+(see `docs/decisions/DEC-RIC-002-document-source-persistence-boundary.md`).
+
+**Security:** `metadataJson` is narrowed from `unknown` and recursively
+rejected when any key (at any depth) is credential- or secret-shaped
+(`token`, `authorization`, `cookie`, `password`, `secret`, `credential`,
+`apiKey`, and case-insensitive variants) before it is ever persisted.
+
 ## Domain persistence surface
 
 `@rick/database` exports a minimal, typed, framework-independent surface
@@ -174,7 +202,7 @@ server-side; there is no client-side-only route guard.
 Unit tests (`health.test.ts`, `auth/password.test.ts`,
 `auth/session-token.test.ts`) run against mocks or pure functions. The
 domain persistence tests (`project.test.ts`, `integration-connection.test.ts`,
-`authenticate.test.ts`) are **integration tests that require a real,
+`document-source.test.ts`, `authenticate.test.ts`) are **integration tests that require a real,
 running PostgreSQL instance** with `DATABASE_URL` set —
 database-enforced constraints (key uniqueness, foreign-key integrity,
 delete-restrict behavior, session expiry/revocation) cannot be proven with

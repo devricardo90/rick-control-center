@@ -52,3 +52,31 @@ export class IntegrationConnectionNotFoundError extends Error {
     this.name = 'IntegrationConnectionNotFoundError'
   }
 }
+
+/** No DocumentSource with this id exists for the given project — either it never existed, or it belongs to a different project (NDERCC-12). */
+export class DocumentSourceNotFoundError extends Error {
+  constructor(public readonly sourceId: string) {
+    super(`Document source not found: ${sourceId}`)
+    this.name = 'DocumentSourceNotFoundError'
+  }
+}
+
+/** A document source already exists for this (project, provider, externalFileId) triple (NDERCC-12). */
+export class DuplicateDocumentSourceError extends Error {
+  constructor(
+    public readonly projectId: string,
+    public readonly provider: string,
+    public readonly externalFileId: string,
+  ) {
+    super(`Document source already registered for project ${projectId}: ${provider}/${externalFileId}`)
+    this.name = 'DuplicateDocumentSourceError'
+  }
+}
+
+/** Document source input failed a domain validation rule (empty field, unsafe URL, malformed checksum, or secret-shaped metadata) (NDERCC-12). */
+export class InvalidDocumentSourceInputError extends Error {
+  constructor(reason: string) {
+    super(`Invalid document source input: ${reason}`)
+    this.name = 'InvalidDocumentSourceInputError'
+  }
+}
