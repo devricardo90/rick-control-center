@@ -9,6 +9,7 @@
  *
  * NDERCC-12 / DEC-RIC-002: strategic document source foundation.
  */
+import type { PrismaClient } from '@prisma/client'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   ArchivedProjectReadOnlyError,
@@ -224,6 +225,21 @@ describe('createDocumentSource — metadata safety', () => {
     expect(source.metadataJson).toEqual({ mimeType: 'application/vnd.google-apps.document', owners: ['someone@example.com'] })
   })
 
+  it('accepts a legitimate array and a deeply nested legitimate JSON object', async () => {
+    const project = await createActiveProject('proj-ds-meta-deep-ok', 'Owner')
+    const metadataJson = {
+      mimeType: 'application/vnd.google-apps.document',
+      owners: ['a@example.com', 'b@example.com'],
+      revisionInfo: {
+        publishedAt: '2026-08-06T00:00:00.000Z',
+        author: { name: 'Someone', id: '12345' },
+        tags: ['strategic', { label: 'reviewed', count: 3 }],
+      },
+    }
+    const source = await createDocumentSource(client, baseSourceInput(project.id, { metadataJson }))
+    expect(source.metadataJson).toEqual(metadataJson)
+  })
+
   it.each([
     ['token'],
     ['accessToken'],
@@ -253,6 +269,93 @@ describe('createDocumentSource — metadata safety', () => {
   })
 })
 
+describe('createDocumentSource — metadata content/body/payload boundary (NDERCC-12 corrective, comment 11522)', () => {
+  it.each([
+    ['content', { content: 'full document body' }],
+    ['body', { body: 'full document body' }],
+    ['headers', { headers: { etag: 'x' } }],
+    ['rawResponse', { rawResponse: { id: '123' } }],
+    ['payload', { payload: { document: '...' } }],
+    ['nested documentContent', { nested: { documentContent: '...' } }],
+  ])('rejects metadata shaped like a document body or raw provider transport (%s)', async (_label, metadataJson) => {
+    const project = await createActiveProject('proj-ds-meta-content', 'Owner')
+    await expect(
+      createDocumentSource(client, baseSourceInput(project.id, { metadataJson })),
+    ).rejects.toBeInstanceOf(InvalidDocumentSourceInputError)
+  })
+
+  it('rejects every content/body/payload/response/headers variant listed in the corrective review', async () => {
+    const project = await createActiveProject('proj-ds-meta-content-variants', 'Owner')
+    const variants = [
+      'documentContent', 'documentBody', 'fullText', 'rawText',
+      'rawPayload', 'response', 'providerResponse', 'responseBody',
+      'httpHeaders', 'requestHeaders', 'responseHeaders',
+    ]
+
+    for (const key of variants) {
+      await expect(
+        createDocumentSource(client, baseSourceInput(project.id, { metadataJson: { [key]: 'x' } })),
+      ).rejects.toBeInstanceOf(InvalidDocumentSourceInputError)
+    }
+  })
+})
+
+describe('createDocumentSource — metadata non-JSON runtime value rejection (NDERCC-12 corrective, comment 11522)', () => {
+  class CustomThing {
+    label = 'x'
+  }
+
+  it.each([
+    ['Date instance', { when: new Date() }],
+    ['Map instance', { lookup: new Map([['a', 1]]) }],
+    ['Set instance', { tags: new Set(['a', 'b']) }],
+    ['bigint', { big: BigInt(1) }],
+    ['function', { fn: () => 'x' }],
+    ['symbol', { sym: Symbol('x') }],
+    ['nested undefined', { nested: { value: undefined } }],
+    ['NaN', { value: Number.NaN }],
+    ['Infinity', { value: Number.POSITIVE_INFINITY }],
+    ['negative Infinity', { value: Number.NEGATIVE_INFINITY }],
+    ['class instance', { thing: new CustomThing() }],
+    ['object with custom prototype', { thing: Object.create({ inherited: true }) as Record<string, unknown> }],
+  ])('rejects metadata containing a %s', async (_label, metadataJson) => {
+    const project = await createActiveProject('proj-ds-meta-nonjson', 'Owner')
+    await expect(
+      createDocumentSource(client, baseSourceInput(project.id, { metadataJson })),
+    ).rejects.toBeInstanceOf(InvalidDocumentSourceInputError)
+  })
+
+  it('rejects a cyclic metadata object without stack overflow', async () => {
+    const project = await createActiveProject('proj-ds-meta-cycle', 'Owner')
+    const cyclic: Record<string, unknown> = { name: 'cycle' }
+    cyclic['self'] = cyclic
+
+    await expect(
+      createDocumentSource(client, baseSourceInput(project.id, { metadataJson: cyclic })),
+    ).rejects.toBeInstanceOf(InvalidDocumentSourceInputError)
+  })
+
+  it('rejects a cycle introduced deeper in the structure (not just at the root)', async () => {
+    const project = await createActiveProject('proj-ds-meta-cycle-deep', 'Owner')
+    const inner: Record<string, unknown> = { label: 'inner' }
+    const outer: Record<string, unknown> = { inner }
+    inner['backToOuter'] = outer
+
+    await expect(
+      createDocumentSource(client, baseSourceInput(project.id, { metadataJson: outer })),
+    ).rejects.toBeInstanceOf(InvalidDocumentSourceInputError)
+  })
+
+  it('does not falsely flag a repeated (non-cyclic) shared reference', async () => {
+    const project = await createActiveProject('proj-ds-meta-shared-ref', 'Owner')
+    const shared = { label: 'shared but not cyclic' }
+    const metadataJson = { a: shared, b: shared }
+
+    const source = await createDocumentSource(client, baseSourceInput(project.id, { metadataJson }))
+    expect(source.metadataJson).toEqual({ a: shared, b: shared })
+  })
+})
+
 describe('findDocumentSourceForProject and listDocumentSourcesForProject', () => {
   it('finds a source scoped to its owning project and returns null across projects', async () => {
     const projectA = await createActiveProject('proj-ds-find-a', 'A')
@@ -273,6 +376,29 @@ describe('findDocumentSourceForProject and listDocumentSourcesForProject', () =>
     const sourcesForA = await listDocumentSourcesForProject(client, projectA.id)
     expect(sourcesForA).toHaveLength(1)
     expect(sourcesForA[0]?.projectId).toBe(projectA.id)
+  })
+
+  it('rejects find and list for an unknown project (NDERCC-12 corrective, comment 11522)', async () => {
+    const unknownProjectId = '00000000-0000-0000-0000-000000000000'
+
+    await expect(findDocumentSourceForProject(client, unknownProjectId, unknownProjectId))
+      .rejects.toBeInstanceOf(ProjectNotFoundError)
+    await expect(listDocumentSourcesForProject(client, unknownProjectId))
+      .rejects.toBeInstanceOf(ProjectNotFoundError)
+  })
+
+  it('returns [] for an existing project with no sources', async () => {
+    const project = await createActiveProject('proj-ds-list-empty', 'Empty Owner')
+    expect(await listDocumentSourcesForProject(client, project.id)).toEqual([])
+  })
+
+  it('allows find and list reads for an archived project', async () => {
+    const project = await createActiveProject('proj-ds-read-archived', 'Owner')
+    const source = await createDocumentSource(client, baseSourceInput(project.id))
+    await transitionProjectLifecycle(client, project.id, 'ARCHIVE')
+
+    expect((await findDocumentSourceForProject(client, project.id, source.id))?.id).toBe(source.id)
+    expect(await listDocumentSourcesForProject(client, project.id)).toHaveLength(1)
   })
 
   it('orders results by documentType, then title, then createdAt, then id', async () => {
@@ -447,5 +573,114 @@ describe('typed errors do not leak raw Prisma or SQL details', () => {
       expect(message).not.toMatch(/prisma/i)
       expect(message).not.toMatch(/SELECT|INSERT|UPDATE|constraint/i)
     }
+  })
+})
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Deterministically races a concurrent project archival (which locks the
+ * project row first and holds it) against a `mutate` operation issued on a
+ * second, independent PrismaClient connection. Proves the archival and the
+ * mutation cannot interleave: `mutate` either completes before the archive
+ * transaction's `SELECT ... FOR UPDATE` runs, or blocks until the archive
+ * commits and then observes ARCHIVED. This helper only exercises the
+ * second path (archive locks first), which is what NDERCC-12 corrective
+ * review comment `11522` requires a regression test for.
+ *
+ * Returns the error `mutate` rejected with (or `undefined` if it resolved).
+ */
+async function raceArchiveAgainstMutation(
+  projectId: string,
+  mutate: (raceClient: PrismaClient) => Promise<unknown>,
+): Promise<unknown> {
+  const archiverClient = createTestClient()
+  const mutatorClient = createTestClient()
+
+  try {
+    let signalLockAcquired: () => void = () => {}
+    const lockAcquired = new Promise<void>((resolve) => {
+      signalLockAcquired = resolve
+    })
+    let signalReleaseArchive: () => void = () => {}
+    const releaseGate = new Promise<void>((resolve) => {
+      signalReleaseArchive = resolve
+    })
+
+    const archiveTx = archiverClient.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id, status FROM projects WHERE id = ${projectId}::uuid FOR UPDATE`
+      signalLockAcquired()
+      await releaseGate
+      return tx.project.update({ where: { id: projectId }, data: { status: 'ARCHIVED', archivedAt: new Date() } })
+    })
+
+    await lockAcquired
+    const mutationPromise = mutate(mutatorClient)
+    // Attach a handler synchronously so Node doesn't report a transient
+    // "unhandledRejection" while this promise sits unawaited during the
+    // sleep/lock-release below — the real assertion happens further down,
+    // via the try/await on this same promise.
+    mutationPromise.catch(() => {})
+    await sleep(50)
+    signalReleaseArchive()
+    await archiveTx
+
+    let caughtError: unknown
+    try {
+      await mutationPromise
+    }
+    catch (err: unknown) {
+      caughtError = err
+    }
+    return caughtError
+  }
+  finally {
+    await archiverClient.$disconnect()
+    await mutatorClient.$disconnect()
+  }
+}
+
+describe('concurrent archival vs mutation (NDERCC-12 corrective, comment 11522)', () => {
+  it('an archive that locks the project row first blocks and wins against a concurrent create', async () => {
+    const project = await createActiveProject('proj-ds-race-create', 'Race Owner')
+
+    const error = await raceArchiveAgainstMutation(
+      project.id,
+      raceClient => createDocumentSource(raceClient, baseSourceInput(project.id)),
+    )
+
+    expect(error).toBeInstanceOf(ArchivedProjectReadOnlyError)
+    expect(await listDocumentSourcesForProject(client, project.id)).toHaveLength(0)
+  })
+
+  it('an archive that locks the project row first blocks and wins against a concurrent registry update', async () => {
+    const project = await createActiveProject('proj-ds-race-update', 'Race Owner')
+    const source = await createDocumentSource(client, baseSourceInput(project.id))
+
+    const error = await raceArchiveAgainstMutation(
+      project.id,
+      raceClient => updateDocumentSourceRegistry(raceClient, project.id, source.id, { title: 'Should not apply' }),
+    )
+
+    expect(error).toBeInstanceOf(ArchivedProjectReadOnlyError)
+    const reloaded = await findDocumentSourceForProject(client, project.id, source.id)
+    expect(reloaded?.title).toBe(source.title)
+  })
+
+  it('an archive that locks the project row first blocks and wins against a concurrent sync success', async () => {
+    const project = await createActiveProject('proj-ds-race-sync', 'Race Owner')
+    const source = await createDocumentSource(client, baseSourceInput(project.id))
+
+    const error = await raceArchiveAgainstMutation(
+      project.id,
+      raceClient => recordDocumentSourceSyncSuccess(raceClient, project.id, source.id, { syncedAt: new Date() }),
+    )
+
+    expect(error).toBeInstanceOf(ArchivedProjectReadOnlyError)
+    const reloaded = await findDocumentSourceForProject(client, project.id, source.id)
+    expect(reloaded?.syncStatus).toBe('PENDING')
+    expect(reloaded?.lastSyncedAt).toBeNull()
   })
 })

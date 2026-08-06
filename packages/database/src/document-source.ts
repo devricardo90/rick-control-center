@@ -5,9 +5,22 @@
  * or parses document body content, and never calls Google Drive or any
  * other external service.
  *
- * `metadataJson` is treated as an `unknown` boundary and narrowed here
- * before persistence: it must be a plain JSON object, and it is recursively
- * rejected when any key (at any depth) is credential- or secret-shaped.
+ * Two hardening properties, corrected after independent review (Jira
+ * comment `11522` on NDERCC-12):
+ *
+ * 1. `metadataJson` is narrowed from `unknown` through a real recursive
+ *    JSON-value validator (with cycle detection) before persistence, not
+ *    just a shallow object/array check — every non-JSON-representable
+ *    runtime value (`Date`, `Map`, `Set`, `bigint`, functions, symbols,
+ *    `NaN`/`Infinity`, class instances, cyclic references) is rejected
+ *    deterministically, and every key at every depth is rejected when it
+ *    is credential-, secret-, or document-content-shaped.
+ * 2. Every mutation (`createDocumentSource`, `updateDocumentSourceRegistry`,
+ *    `recordDocumentSourceSyncSuccess`, `markDocumentSourceSyncStale`,
+ *    `markDocumentSourceSyncError`) runs inside one interactive transaction
+ *    that locks the owning project's row (`SELECT ... FOR UPDATE`) before
+ *    validating its status, so a concurrent project archival is correctly
+ *    serialized against the mutation rather than racing it.
  *
  * NDERCC-12 / DEC-RIC-002: strategic document source foundation.
  */
@@ -28,20 +41,25 @@ import {
 } from './errors.js'
 
 export type { DocumentSource }
-// Exported as values, not just types — the future NDERCC-13 HTTP boundary
-// validates request input against this exact enum set, so it can never
-// drift from what is actually persisted (same rationale as
-// AutonomyPolicy/BranchPolicy in project.ts).
+// Exported as values, not just types — a future HTTP boundary validates
+// request input against this exact enum set, so it can never drift from
+// what is actually persisted (same rationale as AutonomyPolicy/BranchPolicy
+// in project.ts).
 export { DocumentApprovalStatus, DocumentProvider, DocumentSyncStatus, DocumentType } from '@prisma/client'
 
 const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/
 
 // Substring match on a normalized (lowercased, separator-stripped) key
-// catches every case-insensitive spelling of the credential/secret names
-// DEC-RIC-002 lists (`token` also matches `accessToken`/`refreshToken`;
-// `secret` also matches `clientSecret`; `credential` also matches
-// `credentials`) without needing every literal variant enumerated.
+// catches every case-insensitive spelling of the credential/secret/content
+// names DEC-RIC-002 and the NDERCC-12 corrective review list (`token` also
+// matches `accessToken`/`refreshToken`; `secret` also matches
+// `clientSecret`; `credential` also matches `credentials`; `content` also
+// matches `documentContent`; `body` also matches `documentBody`/
+// `responseBody`; `response` also matches `rawResponse`/`providerResponse`;
+// `headers` also matches `httpHeaders`/`requestHeaders`/`responseHeaders`)
+// without needing every literal variant enumerated.
 const FORBIDDEN_METADATA_KEY_FRAGMENTS = [
+  // Credential / secret material (DEC-RIC-002 invariant 10).
   'token',
   'authorization',
   'cookie',
@@ -49,24 +67,100 @@ const FORBIDDEN_METADATA_KEY_FRAGMENTS = [
   'secret',
   'credential',
   'apikey',
+  // Document content / raw provider transport (DEC-RIC-002 invariant 11 —
+  // hardened per NDERCC-12 corrective review comment 11522).
+  'content',
+  'body',
+  'fulltext',
+  'rawtext',
+  'payload',
+  'response',
+  'headers',
 ] as const
 
 function normalizeMetadataKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
-function containsForbiddenMetadataKey(value: unknown): boolean {
+function isForbiddenMetadataKey(key: string): boolean {
+  const normalized = normalizeMetadataKey(key)
+  return FORBIDDEN_METADATA_KEY_FRAGMENTS.some(fragment => normalized.includes(fragment))
+}
+
+function isPlainObject(value: object): boolean {
+  const proto = Reflect.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+function isJsonPrimitive(value: unknown): value is null | string | boolean {
+  return value === null || typeof value === 'string' || typeof value === 'boolean'
+}
+
+function assertFiniteNumber(value: number): void {
+  if (!Number.isFinite(value)) {
+    throw new InvalidDocumentSourceInputError('metadataJson must not contain NaN or Infinity')
+  }
+}
+
+function assertNoCycle(value: object, ancestors: Set<object>): void {
+  if (ancestors.has(value)) {
+    throw new InvalidDocumentSourceInputError('metadataJson must not contain a circular reference')
+  }
+}
+
+function assertSafeJsonArray(value: unknown[], ancestors: Set<object>): void {
+  ancestors.add(value)
+  for (const item of value) {
+    assertSafeJsonValue(item, ancestors)
+  }
+  ancestors.delete(value)
+}
+
+function assertSafeJsonObject(value: object, ancestors: Set<object>): void {
+  if (!isPlainObject(value)) {
+    throw new InvalidDocumentSourceInputError(
+      'metadataJson must contain only plain JSON objects, not class instances such as Date, Map, or Set',
+    )
+  }
+
+  ancestors.add(value)
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (isForbiddenMetadataKey(key)) {
+      throw new InvalidDocumentSourceInputError(`metadataJson must not contain the key "${key}"`)
+    }
+    assertSafeJsonValue(nested, ancestors)
+  }
+  ancestors.delete(value)
+}
+
+/**
+ * Recursively validates that `value` is representable as JSON — `null`,
+ * string, boolean, finite number, array of JSON values, or plain object
+ * with JSON-value properties — with cycle detection so a self-referencing
+ * object throws `InvalidDocumentSourceInputError` instead of overflowing
+ * the stack. `undefined`, `bigint`, functions, symbols, `NaN`/`Infinity`,
+ * and any object whose prototype isn't `Object.prototype`/`null` (e.g.
+ * `Date`, `Map`, `Set`, a class instance) are all rejected deterministically.
+ */
+function assertSafeJsonValue(value: unknown, ancestors: Set<object>): void {
+  if (isJsonPrimitive(value)) {
+    return
+  }
+  if (typeof value === 'number') {
+    assertFiniteNumber(value)
+    return
+  }
+  if (typeof value !== 'object') {
+    throw new InvalidDocumentSourceInputError(`metadataJson must not contain a ${typeof value} value`)
+  }
+
+  assertNoCycle(value, ancestors)
+
   if (Array.isArray(value)) {
-    return value.some(containsForbiddenMetadataKey)
+    assertSafeJsonArray(value, ancestors)
+    return
   }
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-  return Object.entries(value as Record<string, unknown>).some(([key, nested]) => {
-    const normalized = normalizeMetadataKey(key)
-    return FORBIDDEN_METADATA_KEY_FRAGMENTS.some(fragment => normalized.includes(fragment))
-      || containsForbiddenMetadataKey(nested)
-  })
+  assertSafeJsonObject(value, ancestors)
 }
 
 /** Narrows an `unknown` metadata boundary into a safe JSON object, or throws `InvalidDocumentSourceInputError`. */
@@ -74,9 +168,7 @@ function assertValidMetadata(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new InvalidDocumentSourceInputError('metadataJson must be a JSON object, not an array or primitive')
   }
-  if (containsForbiddenMetadataKey(value)) {
-    throw new InvalidDocumentSourceInputError('metadataJson must not contain credential- or secret-shaped keys')
-  }
+  assertSafeJsonValue(value, new Set())
   return value as Record<string, unknown>
 }
 
@@ -114,30 +206,89 @@ function isUniqueConstraintViolation(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
 }
 
-async function requireMutableProject(client: PrismaClient, projectId: string): Promise<void> {
-  const project = await client.project.findUnique({ where: { id: projectId } })
+interface ProjectLockRow {
+  id: string
+  status: string
+}
 
-  if (!project) {
+function isProjectLockRow(value: unknown): value is ProjectLockRow {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const candidate = value as Record<string, unknown>
+  return typeof candidate['id'] === 'string' && typeof candidate['status'] === 'string'
+}
+
+function isProjectLockRowArray(value: unknown): value is ProjectLockRow[] {
+  return Array.isArray(value) && value.every(isProjectLockRow)
+}
+
+/**
+ * Locks the project row (`SELECT ... FOR UPDATE`, Prisma-parameterized —
+ * never string-concatenated) and validates it exists and is not ARCHIVED,
+ * inside the caller's transaction. Must run before any DocumentSource
+ * read/write in that same transaction: Postgres's row-level lock means this
+ * transaction either fully completes before a concurrent
+ * `transitionProjectLifecycle` archival's own `UPDATE` on the same row, or
+ * fully waits for it — the two can never interleave, so a mutation can
+ * never observe a stale pre-archival status and commit after the project
+ * has already been serialized as ARCHIVED.
+ */
+async function lockMutableProject(tx: Prisma.TransactionClient, projectId: string): Promise<void> {
+  const raw: unknown = await tx.$queryRaw`SELECT id, status FROM projects WHERE id = ${projectId}::uuid FOR UPDATE`
+
+  if (!isProjectLockRowArray(raw)) {
+    throw new Error('Unexpected result shape from project lock query')
+  }
+
+  const row = raw[0]
+  if (!row) {
     throw new ProjectNotFoundError(projectId)
   }
-  if (project.status === 'ARCHIVED') {
+  if (row.status === 'ARCHIVED') {
     throw new ArchivedProjectReadOnlyError(projectId)
   }
 }
 
-/** Loads a source scoped to its owning project. A source that exists but belongs to a different project is treated identically to "doesn't exist". */
-async function requireOwnedDocumentSource(
+/**
+ * Shared transactional envelope for every DocumentSource mutation: locks
+ * and validates the owning project, then runs `run` inside the same
+ * transaction. Every mutation function below goes through this single
+ * implementation so all five receive identical archived-project protection.
+ */
+async function withMutableProjectTransaction<T>(
   client: PrismaClient,
+  projectId: string,
+  run: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return client.$transaction(async (tx) => {
+    await lockMutableProject(tx, projectId)
+    return run(tx)
+  })
+}
+
+/** Loads a source scoped to its owning project, inside a transaction. A source that exists but belongs to a different project is treated identically to "doesn't exist". */
+async function requireOwnedDocumentSource(
+  tx: Prisma.TransactionClient,
   projectId: string,
   sourceId: string,
 ): Promise<DocumentSource> {
-  const source = await client.documentSource.findUnique({ where: { id: sourceId } })
+  const source = await tx.documentSource.findUnique({ where: { id: sourceId } })
 
   if (!source || source.projectId !== projectId) {
     throw new DocumentSourceNotFoundError(sourceId)
   }
 
   return source
+}
+
+/** Read-only existence check — does NOT reject an archived project; reads remain allowed for archived projects. */
+async function requireExistingProject(client: PrismaClient, projectId: string): Promise<void> {
+  const project = await client.project.findUnique({ where: { id: projectId }, select: { id: true } })
+
+  if (!project) {
+    throw new ProjectNotFoundError(projectId)
+  }
 }
 
 export interface CreateDocumentSourceInput {
@@ -154,8 +305,9 @@ export interface CreateDocumentSourceInput {
 }
 
 /**
- * Register a new document source. Rejects an unknown or archived project,
- * validates every field per DEC-RIC-002, and translates a duplicate
+ * Register a new document source. Rejects an unknown or archived project
+ * (locked and validated atomically with the insert), validates every field
+ * per DEC-RIC-002, and translates a duplicate
  * `(projectId, provider, externalFileId)` into `DuplicateDocumentSourceError`
  * rather than a raw Prisma constraint error.
  */
@@ -163,8 +315,6 @@ export async function createDocumentSource(
   client: PrismaClient,
   input: CreateDocumentSourceInput,
 ): Promise<DocumentSource> {
-  await requireMutableProject(client, input.projectId)
-
   const externalFileId = assertNonEmptyTrimmed(input.externalFileId, 'externalFileId')
   const title = assertNonEmptyTrimmed(input.title, 'title')
   const url = assertValidUrl(input.url)
@@ -173,7 +323,7 @@ export async function createDocumentSource(
   const metadataJson = input.metadataJson !== undefined ? assertValidMetadata(input.metadataJson) : undefined
 
   try {
-    return await client.documentSource.create({
+    return await withMutableProjectTransaction(client, input.projectId, tx => tx.documentSource.create({
       data: {
         projectId: input.projectId,
         provider: input.provider,
@@ -186,7 +336,7 @@ export async function createDocumentSource(
         ...(input.approvalStatus !== undefined ? { approvalStatus: input.approvalStatus } : {}),
         ...(metadataJson !== undefined ? { metadataJson: metadataJson as Prisma.InputJsonValue } : {}),
       },
-    })
+    }))
   }
   catch (err: unknown) {
     if (isUniqueConstraintViolation(err)) {
@@ -196,12 +346,14 @@ export async function createDocumentSource(
   }
 }
 
-/** Finds one document source scoped to its owning project. Returns `null` (not an error) when it doesn't exist or belongs to a different project. */
+/** Finds one document source scoped to its owning project. Rejects an unknown project; returns `null` (not an error) when the source doesn't exist or belongs to a different project. Reads are allowed for archived projects. */
 export async function findDocumentSourceForProject(
   client: PrismaClient,
   projectId: string,
   sourceId: string,
 ): Promise<DocumentSource | null> {
+  await requireExistingProject(client, projectId)
+
   const source = await client.documentSource.findUnique({ where: { id: sourceId } })
 
   if (!source || source.projectId !== projectId) {
@@ -211,11 +363,13 @@ export async function findDocumentSourceForProject(
   return source
 }
 
-/** Lists a project's document sources in deterministic order: documentType, then title, then createdAt, then id. */
+/** Lists a project's document sources in deterministic order: documentType, then title, then createdAt, then id. Rejects an unknown project; returns `[]` for an existing project with no sources. Reads are allowed for archived projects. */
 export async function listDocumentSourcesForProject(
   client: PrismaClient,
   projectId: string,
 ): Promise<DocumentSource[]> {
+  await requireExistingProject(client, projectId)
+
   return client.documentSource.findMany({
     where: { projectId },
     orderBy: [
@@ -241,31 +395,32 @@ export interface UpdateDocumentSourceRegistryInput {
   revision?: string | null
 }
 
-/** Updates registry/approval fields without touching provenance identifiers or synchronization state. Rejects mutation of an archived project. */
+/** Updates registry/approval fields without touching provenance identifiers or synchronization state. Rejects mutation of an archived project, atomically with the update. */
 export async function updateDocumentSourceRegistry(
   client: PrismaClient,
   projectId: string,
   sourceId: string,
   input: UpdateDocumentSourceRegistryInput,
 ): Promise<DocumentSource> {
-  await requireMutableProject(client, projectId)
-  await requireOwnedDocumentSource(client, projectId, sourceId)
-
   const title = input.title !== undefined ? assertNonEmptyTrimmed(input.title, 'title') : undefined
   const url = input.url !== undefined ? assertValidUrl(input.url) : undefined
   const revision = input.revision !== undefined && input.revision !== null
     ? assertNonEmptyTrimmed(input.revision, 'revision')
     : input.revision
 
-  return client.documentSource.update({
-    where: { id: sourceId },
-    data: {
-      ...(title !== undefined ? { title } : {}),
-      ...(url !== undefined ? { url } : {}),
-      ...(input.documentType !== undefined ? { documentType: input.documentType } : {}),
-      ...(input.approvalStatus !== undefined ? { approvalStatus: input.approvalStatus } : {}),
-      ...(revision !== undefined ? { revision } : {}),
-    },
+  return withMutableProjectTransaction(client, projectId, async (tx) => {
+    await requireOwnedDocumentSource(tx, projectId, sourceId)
+
+    return tx.documentSource.update({
+      where: { id: sourceId },
+      data: {
+        ...(title !== undefined ? { title } : {}),
+        ...(url !== undefined ? { url } : {}),
+        ...(input.documentType !== undefined ? { documentType: input.documentType } : {}),
+        ...(input.approvalStatus !== undefined ? { approvalStatus: input.approvalStatus } : {}),
+        ...(revision !== undefined ? { revision } : {}),
+      },
+    })
   })
 }
 
@@ -279,7 +434,8 @@ export interface RecordDocumentSourceSyncSuccessInput {
 /**
  * Records a successful synchronization atomically: `revision`, `checksum`,
  * `metadataJson`, `syncStatus = SYNCED` and `lastSyncedAt` advance together
- * in a single update. Rejects mutation of an archived project.
+ * in a single update. Rejects mutation of an archived project, atomically
+ * with the update.
  */
 export async function recordDocumentSourceSyncSuccess(
   client: PrismaClient,
@@ -287,51 +443,46 @@ export async function recordDocumentSourceSyncSuccess(
   sourceId: string,
   input: RecordDocumentSourceSyncSuccessInput,
 ): Promise<DocumentSource> {
-  await requireMutableProject(client, projectId)
-  await requireOwnedDocumentSource(client, projectId, sourceId)
-
   const revision = input.revision !== undefined ? assertNonEmptyTrimmed(input.revision, 'revision') : undefined
   const checksum = input.checksum !== undefined ? assertValidChecksum(input.checksum) : undefined
   const metadataJson = input.metadataJson !== undefined ? assertValidMetadata(input.metadataJson) : undefined
 
-  return client.documentSource.update({
-    where: { id: sourceId },
-    data: {
-      ...(revision !== undefined ? { revision } : {}),
-      ...(checksum !== undefined ? { checksum } : {}),
-      ...(metadataJson !== undefined ? { metadataJson: metadataJson as Prisma.InputJsonValue } : {}),
-      syncStatus: 'SYNCED',
-      lastSyncedAt: input.syncedAt,
-    },
+  return withMutableProjectTransaction(client, projectId, async (tx) => {
+    await requireOwnedDocumentSource(tx, projectId, sourceId)
+
+    return tx.documentSource.update({
+      where: { id: sourceId },
+      data: {
+        ...(revision !== undefined ? { revision } : {}),
+        ...(checksum !== undefined ? { checksum } : {}),
+        ...(metadataJson !== undefined ? { metadataJson: metadataJson as Prisma.InputJsonValue } : {}),
+        syncStatus: 'SYNCED',
+        lastSyncedAt: input.syncedAt,
+      },
+    })
   })
 }
 
-/** Marks a source STALE. Preserves `revision`, `checksum`, `metadataJson` and `lastSyncedAt` exactly as they were — only `syncStatus` changes. */
+/** Marks a source STALE, atomically with the archived-project check. Preserves `revision`, `checksum`, `metadataJson` and `lastSyncedAt` exactly as they were — only `syncStatus` changes. */
 export async function markDocumentSourceSyncStale(
   client: PrismaClient,
   projectId: string,
   sourceId: string,
 ): Promise<DocumentSource> {
-  await requireMutableProject(client, projectId)
-  await requireOwnedDocumentSource(client, projectId, sourceId)
-
-  return client.documentSource.update({
-    where: { id: sourceId },
-    data: { syncStatus: 'STALE' },
+  return withMutableProjectTransaction(client, projectId, async (tx) => {
+    await requireOwnedDocumentSource(tx, projectId, sourceId)
+    return tx.documentSource.update({ where: { id: sourceId }, data: { syncStatus: 'STALE' } })
   })
 }
 
-/** Marks a source ERROR after a failed synchronization attempt. Preserves `revision`, `checksum`, `metadataJson` and `lastSyncedAt` — `lastSyncedAt` reflects only the last *successful* sync. */
+/** Marks a source ERROR after a failed synchronization attempt, atomically with the archived-project check. Preserves `revision`, `checksum`, `metadataJson` and `lastSyncedAt` — `lastSyncedAt` reflects only the last *successful* sync. */
 export async function markDocumentSourceSyncError(
   client: PrismaClient,
   projectId: string,
   sourceId: string,
 ): Promise<DocumentSource> {
-  await requireMutableProject(client, projectId)
-  await requireOwnedDocumentSource(client, projectId, sourceId)
-
-  return client.documentSource.update({
-    where: { id: sourceId },
-    data: { syncStatus: 'ERROR' },
+  return withMutableProjectTransaction(client, projectId, async (tx) => {
+    await requireOwnedDocumentSource(tx, projectId, sourceId)
+    return tx.documentSource.update({ where: { id: sourceId }, data: { syncStatus: 'ERROR' } })
   })
 }
