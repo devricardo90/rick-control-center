@@ -129,7 +129,29 @@ This runs the Nuxt 3 dev server for `apps/web` (via
 6. Reload the page — the project(s) you created are still listed (they are
    persisted in PostgreSQL, not held only in browser state).
 
-## 9. Validation commands
+## 9. Connect a GitHub repository (optional)
+
+Select a project's settings and find the **GitHub repository** section.
+This never asks for a token — it only ever takes an owner and a
+repository name (NDERCC-11 / DEC-RIC-001):
+
+1. Enter an owner (e.g. `devricardo90`) and a repository name (e.g.
+   `rick-control-center`) for a **public** repository — this works with
+   no configuration at all.
+2. Click **Connect and verify**. On success you'll see the canonical
+   `owner/repository` name, default branch, visibility, and a `CONNECTED`
+   status with a verification timestamp.
+3. Click **Re-verify** at any time to re-check the repository is still
+   reachable and update the stored metadata.
+
+To verify a **private** repository, or to see real read/push/admin
+permission values instead of `unknown`, set `GITHUB_TOKEN` in `.env`
+first (see `.env.example`) and restart the dev server — the token is
+read once from the server environment and is never visible in the
+browser, never returned by any API response, and never stored in
+PostgreSQL.
+
+## 10. Validation commands
 
 Run these from the repository root before considering any change ready:
 
@@ -150,7 +172,7 @@ applied before you run it, exactly as in CI
 (see [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), which
 provisions its own disposable PostgreSQL service for the same reason).
 
-## 10. Resetting the local database
+## 11. Resetting the local database
 
 To return to a completely clean database:
 
@@ -163,7 +185,7 @@ pnpm db:migrate:deploy   # reapply all migrations
 After a reset, the operator no longer exists — run `pnpm auth:bootstrap`
 again before logging in.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **Port `5432` (PostgreSQL) or `3000` (Nuxt) is already in use**
 Another process — including a previous `docker compose up -d` you forgot
@@ -201,7 +223,23 @@ revokes every existing session as part of the same operation (see
 [`packages/database/README.md`](../../packages/database/README.md#authentication-single-primary-operator)).
 Log in again with the current password.
 
-## 12. Security reminders
+**GitHub connect fails with "This GitHub repository does not exist or is
+not accessible"**
+Either the owner/repository name is wrong, or it's a private repository
+and `GITHUB_TOKEN` isn't set (or doesn't have access) — GitHub
+deliberately returns the same signal for both, to avoid revealing whether
+a private repository exists. Double-check the name, or set
+`GITHUB_TOKEN` for a private repository and restart the server.
+
+**GitHub connect/re-verify fails with "GitHub is temporarily
+unavailable"**
+Covers an invalid/expired token, a permission problem, GitHub rate
+limiting, a request timeout, or GitHub itself being unreachable — the
+repository's previously verified information (if any) is left untouched;
+only its status moves to `ERROR`. Try again, or check `GITHUB_TOKEN` if
+the repository is private.
+
+## 13. Security reminders
 
 - Never commit `.env` — it is already git-ignored; keep it that way, and
   never paste its contents into a commit message, a Jira comment, or a log.
@@ -213,3 +251,10 @@ Log in again with the current password.
   `packages/database/src/{operator,auth-session}.ts`). Do not add a
   `console.log` of a request body, a full `Operator` row, or a raw session
   token while debugging — log the safe, narrowed types instead.
+- `GITHUB_TOKEN` (NDERCC-11 / DEC-RIC-001) is optional and server-only.
+  Public repositories work without it. If you set it, prefer a
+  fine-grained personal access token scoped to only the repository (or
+  repositories) you need, with minimum read-only permissions — this
+  application only ever calls `GET /repos/{owner}/{repo}`, never a write
+  endpoint. It is never stored in PostgreSQL, never returned by any API
+  response, and never logged. Restart the server after changing it.

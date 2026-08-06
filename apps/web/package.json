@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@rick/database": "workspace:*",
+    "@rick/integrations": "workspace:*",
     "@rick/shared": "workspace:*",
     "lucide-vue-next": "^0.468.0",
     "nuxt": "^3.17.0",

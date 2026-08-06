@@ -32,6 +32,9 @@ importers:
       '@rick/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@rick/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       '@rick/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -119,6 +122,12 @@ importers:
       '@rick/shared':
         specifier: workspace:*
         version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+
+  packages/integrations:
     devDependencies:
       typescript:
         specifier: ^5.8.0

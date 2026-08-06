@@ -44,3 +44,11 @@ export class ArchivedProjectReadOnlyError extends Error {
     this.name = 'ArchivedProjectReadOnlyError'
   }
 }
+
+/** No IntegrationConnection with this id exists for the given project — either it never existed, or it belongs to a different project (NDERCC-11). */
+export class IntegrationConnectionNotFoundError extends Error {
+  constructor(public readonly connectionId: string) {
+    super(`Integration connection not found: ${connectionId}`)
+    this.name = 'IntegrationConnectionNotFoundError'
+  }
+}

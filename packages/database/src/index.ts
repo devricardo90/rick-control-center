@@ -15,6 +15,7 @@ export { checkDatabaseHealth } from './health.js'
 export {
   ArchivedProjectReadOnlyError,
   DuplicateProjectKeyError,
+  IntegrationConnectionNotFoundError,
   InvalidProjectTransitionError,
   ProjectNotFoundError,
 } from './errors.js'
@@ -42,10 +43,15 @@ export type {
   IntegrationConnection,
   IntegrationConnectionStatus,
   IntegrationProvider,
+  UpsertVerifiedIntegrationConnectionInput,
 } from './integration-connection.js'
 export {
   createIntegrationConnection,
+  findGitHubConnectionForProject,
+  listGitHubConnectionsByProject,
   listIntegrationConnectionsByProject,
+  markIntegrationConnectionError,
+  upsertVerifiedIntegrationConnection,
 } from './integration-connection.js'
 
 export type { SafeOperator, UpsertPrimaryOperatorInput } from './operator.js'

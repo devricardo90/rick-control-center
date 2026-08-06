@@ -28,6 +28,16 @@ from one of these, that requires a new approved decision (see the
 | [`11-execution-contract-specification.md`](11-execution-contract-specification.md) | Execution Contract specification (RIC-011) |
 | [`12-development-protocol.md`](12-development-protocol.md) | Development protocol |
 
+## Decisions
+
+Approved Architecture Decision Records — each records a decision, but
+never itself authorizes execution outside an approved Execution Contract
+(see the [ADR template](templates/architecture-decision-record.md)).
+
+| Doc | Covers |
+|---|---|
+| [`decisions/DEC-RIC-001-github-credential-boundary.md`](decisions/DEC-RIC-001-github-credential-boundary.md) | Server-only, optional `GITHUB_TOKEN`; no credential persistence or browser/agent exposure (NDERCC-11) |
+
 ## Execution contracts
 
 Concrete, activated contracts for a specific sprint or task — frozen source

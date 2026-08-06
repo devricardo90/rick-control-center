@@ -95,6 +95,12 @@ model IntegrationConnection {
   status                  IntegrationConnectionStatus @default(PENDING)
   externalAccountId       String?   @map("external_account_id")
   configurationEncrypted  String?   @map("configuration_encrypted")
+  // Normalized, NON-SECRET provider metadata only (e.g. GitHub
+  // owner/name/default branch/visibility) — never a token or other
+  // credential (NDERCC-11 / DEC-RIC-001). `configurationEncrypted` above
+  // remains unused (null) for GitHub; it is reserved for a future,
+  // separately-decided encrypted-credential design.
+  configurationJson       Json?     @map("configuration_json")
   lastVerifiedAt          DateTime? @db.Timestamptz(3) @map("last_verified_at")
   createdAt               DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
   updatedAt               DateTime  @updatedAt @db.Timestamptz(3) @map("updated_at")
@@ -104,6 +110,12 @@ model IntegrationConnection {
   // destructive deletion over silently cascading it away).
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  // Prevents duplicate rows for the same project/provider/external
+  // repository while leaving multiple *distinct* repositories per project
+  // fully possible — externalAccountId differs per repository, and
+  // Postgres treats multiple NULLs in a unique index as non-conflicting
+  // (NDERCC-11).
+  @@unique([projectId, provider, externalAccountId], map: "integration_connections_project_provider_external_account_key")
   @@index([projectId])
   @@map("integration_connections")
 }

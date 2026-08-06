@@ -13,6 +13,7 @@
  * for the test that keeps these literals from silently drifting out of
  * sync with the actual Prisma enums.
  */
+import type { PublicGitHubConnection } from '../server/utils/public-github-connection'
 import type { PublicProject } from '../server/utils/public-project'
 import { AUTONOMY_POLICY_OPTIONS, BRANCH_POLICY_OPTIONS } from '../utils/project-enum-options'
 
@@ -31,6 +32,11 @@ interface SettingsFormState {
 }
 
 type LifecycleAction = 'PAUSE' | 'REACTIVATE' | 'ARCHIVE'
+
+interface ConnectGitHubFormState {
+  owner: string
+  repository: string
+}
 
 // SSR runs this as a server-to-server sub-request to /api/projects, which
 // the auth middleware protects independently of the outer page request —
@@ -152,9 +158,11 @@ async function loadSettings(projectId: string): Promise<void> {
 watch(selectedProjectId, (id) => {
   if (id === null) {
     settingsProject.value = null
+    githubConnection.value = null
     return
   }
   void loadSettings(id)
+  void loadGitHubConnection(id)
 }, { immediate: true })
 
 const isSettingsDirty = computed(() => {
@@ -257,6 +265,106 @@ function handleArchive(): void {
     return
   }
   void runLifecycleAction('ARCHIVE')
+}
+
+// ── GitHub integration ─────────────────────────────────────────────────
+// No credential ever appears here: the browser never sends or receives a
+// GitHub token (DEC-RIC-001) — the connect form only ever carries
+// `owner`/`repository`, and every response is the PublicGitHubConnection
+// DTO, which has no field capable of carrying one.
+
+const githubConnection = ref<PublicGitHubConnection | null>(null)
+const githubLoading = ref(false)
+const githubLoadError = ref(false)
+const githubConnecting = ref(false)
+const githubConnectError = ref('')
+const githubReverifying = ref(false)
+const githubReverifyError = ref('')
+const connectGitHubForm = reactive<ConnectGitHubFormState>({ owner: '', repository: '' })
+
+const githubViewState = computed(() =>
+  resolveGitHubIntegrationViewState({
+    loading: githubLoading.value,
+    connecting: githubConnecting.value,
+    reverifying: githubReverifying.value,
+    connectionStatus: githubConnection.value?.status ?? null,
+  }),
+)
+
+async function loadGitHubConnection(projectId: string): Promise<void> {
+  githubLoading.value = true
+  githubLoadError.value = false
+
+  try {
+    const connections = await $fetch<PublicGitHubConnection[]>(`/api/projects/${projectId}/integrations/github`)
+    githubConnection.value = connections[0] ?? null
+  }
+  catch {
+    githubLoadError.value = true
+    githubConnection.value = null
+  }
+  finally {
+    githubLoading.value = false
+  }
+}
+
+async function handleConnectGitHub(): Promise<void> {
+  const project = settingsProject.value
+  if (!project) {
+    return
+  }
+  if (connectGitHubForm.owner.trim().length === 0 || connectGitHubForm.repository.trim().length === 0) {
+    githubConnectError.value = 'Owner and repository are both required.'
+    return
+  }
+
+  githubConnecting.value = true
+  githubConnectError.value = ''
+
+  try {
+    const connection = await $fetch<PublicGitHubConnection>(`/api/projects/${project.id}/integrations/github`, {
+      method: 'PUT',
+      body: { owner: connectGitHubForm.owner.trim(), repository: connectGitHubForm.repository.trim() },
+    })
+    githubConnection.value = connection
+    connectGitHubForm.owner = ''
+    connectGitHubForm.repository = ''
+  }
+  catch (err: unknown) {
+    githubConnectError.value = extractSafeErrorMessage(err, 'Unable to connect the repository. Please try again.')
+  }
+  finally {
+    githubConnecting.value = false
+  }
+}
+
+async function handleReverifyGitHub(): Promise<void> {
+  const project = settingsProject.value
+  const connection = githubConnection.value
+  if (!project || !connection) {
+    return
+  }
+
+  githubReverifying.value = true
+  githubReverifyError.value = ''
+
+  try {
+    const updated = await $fetch<PublicGitHubConnection>(
+      `/api/projects/${project.id}/integrations/github/${connection.id}/verify`,
+      { method: 'POST' },
+    )
+    githubConnection.value = updated
+  }
+  catch (err: unknown) {
+    githubReverifyError.value = extractSafeErrorMessage(err, 'Unable to re-verify the repository. Please try again.')
+    // The server already marks the connection ERROR before responding
+    // with a failure — reload it so the UI reflects that preserved state
+    // (and the untouched lastVerifiedAt/configuration) rather than guessing.
+    await loadGitHubConnection(project.id)
+  }
+  finally {
+    githubReverifying.value = false
+  }
 }
 </script>
 
@@ -611,6 +719,157 @@ function handleArchive(): void {
               </div>
             </div>
           </form>
+        </section>
+
+        <section
+          v-if="selectedProjectId !== null && settingsProject"
+          aria-label="GitHub integration"
+          class="h-fit rounded-lg border border-border bg-background p-4"
+        >
+          <h2 class="mb-4 font-sans text-sm font-semibold text-foreground">
+            GitHub repository
+          </h2>
+
+          <div
+            v-if="githubViewState === 'loading'"
+            class="text-sm text-muted-foreground"
+          >
+            Loading GitHub connection…
+          </div>
+
+          <div
+            v-else-if="githubLoadError"
+            class="text-sm text-red-500"
+          >
+            Unable to load the GitHub connection. Please try again.
+          </div>
+
+          <div v-else-if="githubViewState === 'disconnected' || githubViewState === 'connecting'">
+            <p class="mb-4 text-sm text-muted-foreground">
+              No repository connected. Public repositories can be verified without
+              any token. Private repositories require
+              <code class="font-mono">GITHUB_TOKEN</code> to already be set on the
+              server — no token is entered here or anywhere in this interface.
+            </p>
+
+            <form
+              class="flex flex-col gap-4"
+              @submit.prevent="handleConnectGitHub"
+            >
+              <div class="flex flex-col gap-1">
+                <label
+                  for="github-owner"
+                  class="text-sm text-muted-foreground"
+                >Owner</label>
+                <input
+                  id="github-owner"
+                  v-model="connectGitHubForm.owner"
+                  type="text"
+                  required
+                  :disabled="githubConnecting"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                />
+              </div>
+
+              <div class="flex flex-col gap-1">
+                <label
+                  for="github-repository"
+                  class="text-sm text-muted-foreground"
+                >Repository</label>
+                <input
+                  id="github-repository"
+                  v-model="connectGitHubForm.repository"
+                  type="text"
+                  required
+                  :disabled="githubConnecting"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                />
+              </div>
+
+              <p
+                v-if="githubConnectError"
+                class="text-sm text-red-500"
+              >
+                {{ githubConnectError }}
+              </p>
+
+              <button
+                type="submit"
+                :disabled="githubConnecting"
+                class="rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              >
+                {{ githubConnecting ? 'Connecting…' : 'Connect and verify' }}
+              </button>
+            </form>
+          </div>
+
+          <div
+            v-else
+            class="flex flex-col gap-3"
+          >
+            <div
+              v-if="githubConnection?.configuration"
+              class="flex flex-col gap-1"
+            >
+              <p class="text-sm font-medium text-foreground">
+                {{ githubConnection.configuration.fullName }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Default branch:
+                <span class="font-mono">{{ githubConnection.configuration.defaultBranch }}</span>
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Visibility: {{ githubConnection.configuration.visibility }} ·
+                Access: {{ githubConnection.configuration.accessMode }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Permissions — read: {{ githubConnection.configuration.permissions.read ?? 'unknown' }},
+                push: {{ githubConnection.configuration.permissions.push ?? 'unknown' }},
+                admin: {{ githubConnection.configuration.permissions.admin ?? 'unknown' }}
+              </p>
+
+              <p
+                v-if="githubConnection.configuration.archived"
+                class="mt-1 text-sm text-amber-600 dark:text-amber-500"
+              >
+                This repository is archived on GitHub.
+              </p>
+            </div>
+
+            <p class="text-xs text-muted-foreground">
+              Status:
+              <span
+                class="rounded-full border border-border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide"
+                :class="githubConnection?.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'"
+              >{{ githubConnection?.status }}</span>
+              <template v-if="githubConnection?.lastVerifiedAt">
+                · Last verified {{ githubConnection.lastVerifiedAt }}
+              </template>
+            </p>
+
+            <p
+              v-if="githubReverifyError"
+              class="text-sm text-red-500"
+            >
+              {{ githubReverifyError }}
+            </p>
+            <p
+              v-else-if="githubViewState === 'error'"
+              class="text-sm text-red-500"
+            >
+              The last verification attempt failed. The previously verified
+              information above has been preserved.
+            </p>
+
+            <button
+              type="button"
+              :disabled="githubReverifying"
+              class="self-start rounded-md border border-border px-4 py-2 text-sm font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              @click="handleReverifyGitHub"
+            >
+              {{ githubReverifying ? 'Re-verifying…' : 'Re-verify' }}
+            </button>
+          </div>
         </section>
       </div>
     </div>
