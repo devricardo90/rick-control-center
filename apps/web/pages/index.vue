@@ -155,6 +155,113 @@ async function loadSettings(projectId: string): Promise<void> {
   }
 }
 
+// ── GitHub integration ─────────────────────────────────────────────────
+// No credential ever appears here: the browser never sends or receives a
+// GitHub token (DEC-RIC-001) — the connect form only ever carries
+// `owner`/`repository`, and every response is the PublicGitHubConnection
+// DTO, which has no field capable of carrying one.
+//
+// Declared before the `selectedProjectId` watcher below: that watcher
+// runs with `{ immediate: true }`, which invokes its callback
+// synchronously during setup while `selectedProjectId` is still `null` —
+// so `githubConnection` must already be initialized by the time the
+// watcher is registered, or referencing it throws a temporal-dead-zone
+// ReferenceError on every page load.
+
+const githubConnection = ref<PublicGitHubConnection | null>(null)
+const githubLoading = ref(false)
+const githubLoadError = ref(false)
+const githubConnecting = ref(false)
+const githubConnectError = ref('')
+const githubReverifying = ref(false)
+const githubReverifyError = ref('')
+const connectGitHubForm = reactive<ConnectGitHubFormState>({ owner: '', repository: '' })
+
+const githubViewState = computed(() =>
+  resolveGitHubIntegrationViewState({
+    loading: githubLoading.value,
+    connecting: githubConnecting.value,
+    reverifying: githubReverifying.value,
+    connectionStatus: githubConnection.value?.status ?? null,
+  }),
+)
+
+async function loadGitHubConnection(projectId: string): Promise<void> {
+  githubLoading.value = true
+  githubLoadError.value = false
+
+  try {
+    const connections = await $fetch<PublicGitHubConnection[]>(`/api/projects/${projectId}/integrations/github`)
+    githubConnection.value = connections[0] ?? null
+  }
+  catch {
+    githubLoadError.value = true
+    githubConnection.value = null
+  }
+  finally {
+    githubLoading.value = false
+  }
+}
+
+async function handleConnectGitHub(): Promise<void> {
+  const project = settingsProject.value
+  if (!project) {
+    return
+  }
+  if (connectGitHubForm.owner.trim().length === 0 || connectGitHubForm.repository.trim().length === 0) {
+    githubConnectError.value = 'Owner and repository are both required.'
+    return
+  }
+
+  githubConnecting.value = true
+  githubConnectError.value = ''
+
+  try {
+    const connection = await $fetch<PublicGitHubConnection>(`/api/projects/${project.id}/integrations/github`, {
+      method: 'PUT',
+      body: { owner: connectGitHubForm.owner.trim(), repository: connectGitHubForm.repository.trim() },
+    })
+    githubConnection.value = connection
+    connectGitHubForm.owner = ''
+    connectGitHubForm.repository = ''
+  }
+  catch (err: unknown) {
+    githubConnectError.value = extractSafeErrorMessage(err, 'Unable to connect the repository. Please try again.')
+  }
+  finally {
+    githubConnecting.value = false
+  }
+}
+
+async function handleReverifyGitHub(): Promise<void> {
+  const project = settingsProject.value
+  const connection = githubConnection.value
+  if (!project || !connection) {
+    return
+  }
+
+  githubReverifying.value = true
+  githubReverifyError.value = ''
+
+  try {
+    const updated = await $fetch<PublicGitHubConnection>(
+      `/api/projects/${project.id}/integrations/github/${connection.id}/verify`,
+      { method: 'POST' },
+    )
+    githubConnection.value = updated
+  }
+  catch (err: unknown) {
+    githubReverifyError.value = extractSafeErrorMessage(err, 'Unable to re-verify the repository. Please try again.')
+    // The server already marks the connection ERROR before responding
+    // with a failure — reload it so the UI reflects that preserved state
+    // (and the untouched lastVerifiedAt/configuration) rather than guessing.
+    await loadGitHubConnection(project.id)
+  }
+  finally {
+    githubReverifying.value = false
+  }
+}
+
 watch(selectedProjectId, (id) => {
   if (id === null) {
     settingsProject.value = null
@@ -265,106 +372,6 @@ function handleArchive(): void {
     return
   }
   void runLifecycleAction('ARCHIVE')
-}
-
-// ── GitHub integration ─────────────────────────────────────────────────
-// No credential ever appears here: the browser never sends or receives a
-// GitHub token (DEC-RIC-001) — the connect form only ever carries
-// `owner`/`repository`, and every response is the PublicGitHubConnection
-// DTO, which has no field capable of carrying one.
-
-const githubConnection = ref<PublicGitHubConnection | null>(null)
-const githubLoading = ref(false)
-const githubLoadError = ref(false)
-const githubConnecting = ref(false)
-const githubConnectError = ref('')
-const githubReverifying = ref(false)
-const githubReverifyError = ref('')
-const connectGitHubForm = reactive<ConnectGitHubFormState>({ owner: '', repository: '' })
-
-const githubViewState = computed(() =>
-  resolveGitHubIntegrationViewState({
-    loading: githubLoading.value,
-    connecting: githubConnecting.value,
-    reverifying: githubReverifying.value,
-    connectionStatus: githubConnection.value?.status ?? null,
-  }),
-)
-
-async function loadGitHubConnection(projectId: string): Promise<void> {
-  githubLoading.value = true
-  githubLoadError.value = false
-
-  try {
-    const connections = await $fetch<PublicGitHubConnection[]>(`/api/projects/${projectId}/integrations/github`)
-    githubConnection.value = connections[0] ?? null
-  }
-  catch {
-    githubLoadError.value = true
-    githubConnection.value = null
-  }
-  finally {
-    githubLoading.value = false
-  }
-}
-
-async function handleConnectGitHub(): Promise<void> {
-  const project = settingsProject.value
-  if (!project) {
-    return
-  }
-  if (connectGitHubForm.owner.trim().length === 0 || connectGitHubForm.repository.trim().length === 0) {
-    githubConnectError.value = 'Owner and repository are both required.'
-    return
-  }
-
-  githubConnecting.value = true
-  githubConnectError.value = ''
-
-  try {
-    const connection = await $fetch<PublicGitHubConnection>(`/api/projects/${project.id}/integrations/github`, {
-      method: 'PUT',
-      body: { owner: connectGitHubForm.owner.trim(), repository: connectGitHubForm.repository.trim() },
-    })
-    githubConnection.value = connection
-    connectGitHubForm.owner = ''
-    connectGitHubForm.repository = ''
-  }
-  catch (err: unknown) {
-    githubConnectError.value = extractSafeErrorMessage(err, 'Unable to connect the repository. Please try again.')
-  }
-  finally {
-    githubConnecting.value = false
-  }
-}
-
-async function handleReverifyGitHub(): Promise<void> {
-  const project = settingsProject.value
-  const connection = githubConnection.value
-  if (!project || !connection) {
-    return
-  }
-
-  githubReverifying.value = true
-  githubReverifyError.value = ''
-
-  try {
-    const updated = await $fetch<PublicGitHubConnection>(
-      `/api/projects/${project.id}/integrations/github/${connection.id}/verify`,
-      { method: 'POST' },
-    )
-    githubConnection.value = updated
-  }
-  catch (err: unknown) {
-    githubReverifyError.value = extractSafeErrorMessage(err, 'Unable to re-verify the repository. Please try again.')
-    // The server already marks the connection ERROR before responding
-    // with a failure — reload it so the UI reflects that preserved state
-    // (and the untouched lastVerifiedAt/configuration) rather than guessing.
-    await loadGitHubConnection(project.id)
-  }
-  finally {
-    githubReverifying.value = false
-  }
 }
 </script>
 
