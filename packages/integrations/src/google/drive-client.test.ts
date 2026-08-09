@@ -80,11 +80,12 @@ function sequencedFetch(responses: Response[]): typeof fetch {
   }) as unknown as typeof fetch
 }
 
-function reader(fetchImpl: typeof fetch, overrides: { maxExportBytes?: number } = {}) {
+function reader(fetchImpl: typeof fetch, overrides: { maxExportBytes?: number, timeoutMs?: number } = {}) {
   return createGoogleDriveReader({
     accessTokenProvider: tokenProvider,
     fetchImpl,
     ...(overrides.maxExportBytes !== undefined ? { maxExportBytes: overrides.maxExportBytes } : {}),
+    ...(overrides.timeoutMs !== undefined ? { timeoutMs: overrides.timeoutMs } : {}),
   })
 }
 
@@ -512,6 +513,130 @@ describe('snapshotGoogleDocument — normalization and error propagation', () =>
     ])
 
     await expect(reader(fetchImpl).snapshotGoogleDocument(FILE_ID)).rejects.toBeInstanceOf(GoogleNotFoundError)
+  })
+})
+
+/**
+ * Corrective review, remaining finding: the deadline must cover body
+ * consumption, not just the request and headers. Each test uses a stream
+ * that delivers headers and then never completes — the shape a stalled
+ * upstream actually takes — and a short timeout so the suite stays fast.
+ */
+describe('createGoogleDriveReader — deadline covers the whole operation', () => {
+  const TIMEOUT_MS = 60
+
+  /** Headers arrive immediately; the body emits one chunk and then stalls forever. */
+  function stallingBodyResponse(contentType: string): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'))
+        // Deliberately never enqueues again and never closes.
+      },
+    })
+    return new Response(stream, { status: 200, headers: { 'content-type': contentType } })
+  }
+
+  it('metadata headers arrive and the body then stalls — GoogleTimeoutError', async () => {
+    const fetchImpl = sequencedFetch([stallingBodyResponse('application/json')])
+
+    await expect(reader(fetchImpl, { timeoutMs: TIMEOUT_MS }).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleTimeoutError)
+  })
+
+  it('export headers arrive and the body then stalls — GoogleTimeoutError', async () => {
+    const fetchImpl = sequencedFetch([stallingBodyResponse('text/plain')])
+
+    await expect(reader(fetchImpl, { timeoutMs: TIMEOUT_MS }).exportGoogleDocumentText(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleTimeoutError)
+  })
+
+  it('a stalled body during a snapshot surfaces as GoogleTimeoutError, not a retry', async () => {
+    const fetchImpl = sequencedFetch([stallingBodyResponse('application/json')])
+
+    await expect(reader(fetchImpl, { timeoutMs: TIMEOUT_MS }).snapshotGoogleDocument(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleTimeoutError)
+  })
+
+  it('a request that stalls before headers still times out — pre-existing behaviour preserved', async () => {
+    const neverResolves = (() => new Promise<Response>(() => {})) as unknown as typeof fetch
+
+    await expect(reader(neverResolves, { timeoutMs: TIMEOUT_MS }).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleTimeoutError)
+  })
+
+  it('an immediate AbortError still maps to GoogleTimeoutError', async () => {
+    const abortError = new Error('aborted')
+    abortError.name = 'AbortError'
+    const fetchImpl = (() => Promise.reject(abortError)) as unknown as typeof fetch
+
+    await expect(reader(fetchImpl, { timeoutMs: TIMEOUT_MS }).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleTimeoutError)
+  })
+
+  it('a timeout never leaks a raw AbortError, a stream error, a token or a header', async () => {
+    const fetchImpl = sequencedFetch([stallingBodyResponse('application/json')])
+
+    try {
+      await reader(fetchImpl, { timeoutMs: TIMEOUT_MS }).getGoogleDocumentMetadata(FILE_ID)
+      expect.unreachable('expected a GoogleTimeoutError')
+    }
+    catch (err: unknown) {
+      expect(err).toBeInstanceOf(GoogleTimeoutError)
+      const text = err instanceof Error ? `${err.name}\n${err.message}\n${err.stack ?? ''}` : String(err)
+      expect(text).not.toContain('AbortError')
+      expect(text).not.toContain(ACCESS_TOKEN)
+      expect(text).not.toContain('Authorization')
+    }
+  })
+})
+
+/** Same finding: a size rejection must never be reported as a timeout, and vice versa. */
+describe('createGoogleDriveReader — deadline does not swallow other outcomes', () => {
+  it('a body-size rejection stays GoogleResponseTooLargeError and does not become a timeout', async () => {
+    // A body that exceeds the limit but arrives promptly: the size guard
+    // must win, and a generous timeout must not turn it into a timeout.
+    const oversized = new Response('x'.repeat(4096), {
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+    })
+
+    await expect(
+      reader(sequencedFetch([oversized]), { maxExportBytes: 1024, timeoutMs: 5000 })
+        .exportGoogleDocumentText(FILE_ID),
+    ).rejects.toBeInstanceOf(GoogleResponseTooLargeError)
+  })
+
+  it('an oversized metadata body stays GoogleResponseTooLargeError under an active deadline', async () => {
+    const oversized = new Response(JSON.stringify({ ...metadataBody(), padding: 'x'.repeat(80 * 1024) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+
+    await expect(reader(sequencedFetch([oversized]), { timeoutMs: 5000 }).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleResponseTooLargeError)
+  })
+
+  it('normal responses are unaffected by the deadline', async () => {
+    const fetchImpl = sequencedFetch([
+      jsonResponse(metadataBody()),
+      textResponse('content'),
+      jsonResponse(metadataBody()),
+    ])
+
+    const snapshot = await reader(fetchImpl, { timeoutMs: 5000 }).snapshotGoogleDocument(FILE_ID)
+
+    expect(snapshot.providerVersion).toBe('23')
+    expect(snapshot.contentText).toBe('content')
+  })
+
+  it('a completed operation clears its deadline, so a later timer cannot fire', async () => {
+    const fetchImpl = sequencedFetch([jsonResponse(metadataBody())])
+
+    await expect(reader(fetchImpl, { timeoutMs: 30 }).getGoogleDocumentMetadata(FILE_ID)).resolves.toBeDefined()
+
+    // If the deadline were still armed it would abort during this wait and
+    // surface as an unhandled rejection.
+    await new Promise(resolve => setTimeout(resolve, 80))
   })
 })
 

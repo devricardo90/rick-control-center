@@ -18,7 +18,12 @@
  *     PDF being *registered*, not merely failing later at snapshot time;
  *   - `readBoundedBody` is the only way a response body is consumed, and
  *     bounds it by bytes actually read rather than trusting the declared
- *     `content-length`.
+ *     `content-length`;
+ *   - `requestBoundedBody` is the only way a request is issued, and holds
+ *     one deadline open across request establishment, response headers and
+ *     complete body consumption — so a server that returns headers and
+ *     then stalls mid-stream still fails as `GoogleTimeoutError` rather
+ *     than hanging.
  *
  * Uses Node's native stable `fetch`; `google-auth-library` is confined to
  * access-token.ts and reaches this module only as an opaque
@@ -32,7 +37,8 @@
  *   - GoogleNotFoundError        — 404: absent, or not shared with the service account.
  *   - GoogleAuthError            — 401, or 403 permission denial, or token minting failure.
  *   - GoogleRateLimitError       — 429.
- *   - GoogleTimeoutError         — aborted by the deterministic timeout below.
+ *   - GoogleTimeoutError         — the deadline expired at any phase:
+ *     connecting, awaiting headers, or streaming the body.
  *   - GoogleUpstreamError        — any other non-2xx, or a network failure.
  *   - GoogleMalformedResponseError — 2xx whose body did not narrow.
  *   - GoogleUnsupportedDocumentTypeError — the file is not a native Google Doc.
@@ -224,26 +230,132 @@ export function narrowGoogleDocumentMetadata(raw: unknown): GoogleDocumentMetada
   }
 }
 
-async function request(context: ReaderContext, url: string, accept: string): Promise<Response> {
-  const token = await context.accessTokenProvider.getAccessToken()
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), context.timeoutMs)
+/**
+ * A single deadline covering one complete HTTP operation.
+ *
+ * The previous implementation armed a timer, cleared it as soon as
+ * `fetch()` resolved, and only then consumed the body — so a server that
+ * returned headers promptly and then stalled mid-stream left
+ * `reader.read()` pending with no timeout at all (corrective review,
+ * remaining finding). The deadline now stays armed until the body has been
+ * fully read.
+ *
+ * It aborts on two levels, because neither alone is sufficient:
+ *   - `signal` is passed to `fetch`, which is what actually tears down a
+ *     real socket and frees the connection;
+ *   - `expired` is a promise the caller races, which is what guarantees a
+ *     deterministic `GoogleTimeoutError` even against a body stream that
+ *     ignores the signal.
+ */
+interface Deadline {
+  signal: AbortSignal
+  /** Rejects with `GoogleTimeoutError` once the deadline passes. */
+  expired: Promise<never>
+  clear: () => void
+}
 
+function startDeadline(timeoutMs: number): Deadline {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new GoogleTimeoutError())
+    }, timeoutMs)
+  })
+
+  // A deadline that fires when nothing happens to be racing it (for
+  // example between the header and body phases) must not surface as an
+  // unhandled rejection. Attaching this handler does not stop the
+  // rejection reaching the races below.
+  expired.catch(() => undefined)
+
+  return {
+    signal: controller.signal,
+    expired,
+    clear: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+      }
+    },
+  }
+}
+
+/** Best-effort teardown. Never throws, so it can never replace the error the caller is already raising. */
+async function cancelBodyQuietly(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined)
+}
+
+/** Translates a transport-phase failure. The only abort source in this module is our own deadline. */
+function toTransportError(err: unknown, fallbackMessage: string): Error {
+  if (err instanceof GoogleTimeoutError || err instanceof GoogleResponseTooLargeError) {
+    return err
+  }
+  if (err instanceof Error && err.name === 'AbortError') {
+    return new GoogleTimeoutError()
+  }
+  return new GoogleUpstreamError(0, fallbackMessage)
+}
+
+async function fetchWithin(context: ReaderContext, url: string, init: RequestInit, deadline: Deadline): Promise<Response> {
   try {
-    return await context.fetchImpl(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}`, Accept: accept },
-      signal: controller.signal,
-    })
+    return await Promise.race([context.fetchImpl(url, init), deadline.expired])
   }
   catch (err: unknown) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new GoogleTimeoutError()
+    throw toTransportError(err, 'Unable to reach Google Drive.')
+  }
+}
+
+/**
+ * Consumes the body under the same deadline that covered the request.
+ * `GoogleResponseTooLargeError` is preserved verbatim — a body rejected
+ * for size must never be reported as a timeout.
+ */
+async function readBodyWithin(response: Response, limitBytes: number, deadline: Deadline): Promise<Uint8Array> {
+  try {
+    return await Promise.race([readBoundedBody(response, limitBytes), deadline.expired])
+  }
+  catch (err: unknown) {
+    const mapped = toTransportError(err, 'Unable to read the Google Drive response.')
+    if (mapped instanceof GoogleTimeoutError) {
+      await cancelBodyQuietly(response)
     }
-    throw new GoogleUpstreamError(0, 'Unable to reach Google Drive.')
+    throw mapped
+  }
+}
+
+/**
+ * Performs one authenticated read-only GET and returns its bounded body.
+ * Request establishment, response headers and complete body consumption
+ * all run inside one deadline, which is cleared only once the operation
+ * has finished or failed.
+ */
+async function requestBoundedBody(
+  context: ReaderContext,
+  url: string,
+  accept: string,
+  limitBytes: number,
+): Promise<Uint8Array> {
+  const token = await context.accessTokenProvider.getAccessToken()
+  const deadline = startDeadline(context.timeoutMs)
+
+  try {
+    const response = await fetchWithin(context, url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}`, Accept: accept },
+      signal: deadline.signal,
+    }, deadline)
+
+    if (!response.ok) {
+      await cancelBodyQuietly(response)
+      throwForErrorStatus(response.status)
+    }
+
+    return await readBodyWithin(response, limitBytes, deadline)
   }
   finally {
-    clearTimeout(timer)
+    deadline.clear()
   }
 }
 
@@ -266,13 +378,7 @@ async function readMetadata(context: ReaderContext, fileId: string): Promise<Goo
 
   const url = `${GOOGLE_API_ORIGIN}/drive/v3/files/${encodeURIComponent(fileId)}`
     + `?fields=${encodeURIComponent(GOOGLE_METADATA_FIELDS)}&supportsAllDrives=true`
-  const response = await request(context, url, 'application/json')
-
-  if (!response.ok) {
-    throwForErrorStatus(response.status)
-  }
-
-  const bytes = await readBoundedBody(response, MAX_METADATA_BYTES)
+  const bytes = await requestBoundedBody(context, url, 'application/json', MAX_METADATA_BYTES)
 
   let body: unknown
   try {
@@ -292,13 +398,10 @@ async function readExportedText(context: ReaderContext, fileId: string): Promise
 
   const url = `${GOOGLE_API_ORIGIN}/drive/v3/files/${encodeURIComponent(fileId)}`
     + `/export?mimeType=${encodeURIComponent(EXPORT_MIME_TYPE)}`
-  const response = await request(context, url, EXPORT_MIME_TYPE)
 
-  if (!response.ok) {
-    throwForErrorStatus(response.status)
-  }
-
-  return normalizeGoogleDocumentText(await readBoundedBody(response, context.maxExportBytes))
+  return normalizeGoogleDocumentText(
+    await requestBoundedBody(context, url, EXPORT_MIME_TYPE, context.maxExportBytes),
+  )
 }
 
 /** One metadata/export/metadata cycle. Returns `null` when the version drifted mid-export. */
