@@ -22,23 +22,35 @@
  *    validating its status, so a concurrent project archival is correctly
  *    serialized against the mutation rather than racing it.
  *
+ * Both properties now live in `src/internal/document-field-validation.ts`
+ * and `src/internal/mutable-project-transaction.ts` (extracted unchanged
+ * by NDERCC-13) so that the immutable snapshot writer in
+ * `src/document-snapshot.ts` enforces the identical rules instead of a
+ * near-copy of them.
+ *
  * NDERCC-12 / DEC-RIC-002: strategic document source foundation.
  */
-import { Prisma } from '@prisma/client'
 import type {
   DocumentApprovalStatus,
   DocumentProvider,
   DocumentSource,
   DocumentType,
+  Prisma,
   PrismaClient,
 } from '@prisma/client'
+import { DuplicateDocumentSourceError } from './errors.js'
 import {
-  ArchivedProjectReadOnlyError,
-  DocumentSourceNotFoundError,
-  DuplicateDocumentSourceError,
-  InvalidDocumentSourceInputError,
-  ProjectNotFoundError,
-} from './errors.js'
+  assertNonEmptyTrimmed,
+  assertValidChecksum,
+  assertValidMetadata,
+  assertValidUrl,
+} from './internal/document-field-validation.js'
+import {
+  isUniqueConstraintViolation,
+  requireExistingProject,
+  requireOwnedDocumentSource,
+  withMutableProjectTransaction,
+} from './internal/mutable-project-transaction.js'
 
 export type { DocumentSource }
 // Exported as values, not just types — a future HTTP boundary validates
@@ -46,250 +58,6 @@ export type { DocumentSource }
 // what is actually persisted (same rationale as AutonomyPolicy/BranchPolicy
 // in project.ts).
 export { DocumentApprovalStatus, DocumentProvider, DocumentSyncStatus, DocumentType } from '@prisma/client'
-
-const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/
-
-// Substring match on a normalized (lowercased, separator-stripped) key
-// catches every case-insensitive spelling of the credential/secret/content
-// names DEC-RIC-002 and the NDERCC-12 corrective review list (`token` also
-// matches `accessToken`/`refreshToken`; `secret` also matches
-// `clientSecret`; `credential` also matches `credentials`; `content` also
-// matches `documentContent`; `body` also matches `documentBody`/
-// `responseBody`; `response` also matches `rawResponse`/`providerResponse`;
-// `headers` also matches `httpHeaders`/`requestHeaders`/`responseHeaders`)
-// without needing every literal variant enumerated.
-const FORBIDDEN_METADATA_KEY_FRAGMENTS = [
-  // Credential / secret material (DEC-RIC-002 invariant 10).
-  'token',
-  'authorization',
-  'cookie',
-  'password',
-  'secret',
-  'credential',
-  'apikey',
-  // Document content / raw provider transport (DEC-RIC-002 invariant 11 —
-  // hardened per NDERCC-12 corrective review comment 11522).
-  'content',
-  'body',
-  'fulltext',
-  'rawtext',
-  'payload',
-  'response',
-  'headers',
-] as const
-
-function normalizeMetadataKey(key: string): string {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, '')
-}
-
-function isForbiddenMetadataKey(key: string): boolean {
-  const normalized = normalizeMetadataKey(key)
-  return FORBIDDEN_METADATA_KEY_FRAGMENTS.some(fragment => normalized.includes(fragment))
-}
-
-function isPlainObject(value: object): boolean {
-  const proto = Reflect.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
-
-function isJsonPrimitive(value: unknown): value is null | string | boolean {
-  return value === null || typeof value === 'string' || typeof value === 'boolean'
-}
-
-function assertFiniteNumber(value: number): void {
-  if (!Number.isFinite(value)) {
-    throw new InvalidDocumentSourceInputError('metadataJson must not contain NaN or Infinity')
-  }
-}
-
-function assertNoCycle(value: object, ancestors: Set<object>): void {
-  if (ancestors.has(value)) {
-    throw new InvalidDocumentSourceInputError('metadataJson must not contain a circular reference')
-  }
-}
-
-function assertSafeJsonArray(value: unknown[], ancestors: Set<object>): void {
-  ancestors.add(value)
-  for (const item of value) {
-    assertSafeJsonValue(item, ancestors)
-  }
-  ancestors.delete(value)
-}
-
-function assertSafeJsonObject(value: object, ancestors: Set<object>): void {
-  if (!isPlainObject(value)) {
-    throw new InvalidDocumentSourceInputError(
-      'metadataJson must contain only plain JSON objects, not class instances such as Date, Map, or Set',
-    )
-  }
-
-  ancestors.add(value)
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (isForbiddenMetadataKey(key)) {
-      throw new InvalidDocumentSourceInputError(`metadataJson must not contain the key "${key}"`)
-    }
-    assertSafeJsonValue(nested, ancestors)
-  }
-  ancestors.delete(value)
-}
-
-/**
- * Recursively validates that `value` is representable as JSON — `null`,
- * string, boolean, finite number, array of JSON values, or plain object
- * with JSON-value properties — with cycle detection so a self-referencing
- * object throws `InvalidDocumentSourceInputError` instead of overflowing
- * the stack. `undefined`, `bigint`, functions, symbols, `NaN`/`Infinity`,
- * and any object whose prototype isn't `Object.prototype`/`null` (e.g.
- * `Date`, `Map`, `Set`, a class instance) are all rejected deterministically.
- */
-function assertSafeJsonValue(value: unknown, ancestors: Set<object>): void {
-  if (isJsonPrimitive(value)) {
-    return
-  }
-  if (typeof value === 'number') {
-    assertFiniteNumber(value)
-    return
-  }
-  if (typeof value !== 'object') {
-    throw new InvalidDocumentSourceInputError(`metadataJson must not contain a ${typeof value} value`)
-  }
-
-  assertNoCycle(value, ancestors)
-
-  if (Array.isArray(value)) {
-    assertSafeJsonArray(value, ancestors)
-    return
-  }
-  assertSafeJsonObject(value, ancestors)
-}
-
-/** Narrows an `unknown` metadata boundary into a safe JSON object, or throws `InvalidDocumentSourceInputError`. */
-function assertValidMetadata(value: unknown): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new InvalidDocumentSourceInputError('metadataJson must be a JSON object, not an array or primitive')
-  }
-  assertSafeJsonValue(value, new Set())
-  return value as Record<string, unknown>
-}
-
-function assertNonEmptyTrimmed(value: string, field: string): string {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
-    throw new InvalidDocumentSourceInputError(`${field} must not be empty`)
-  }
-  return trimmed
-}
-
-/** Absolute `https:` URL only — rejects `http:`, relative URLs, embedded credentials, and non-http(s) schemes like `javascript:`/`data:`. */
-function assertValidUrl(value: string): string {
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  }
-  catch {
-    throw new InvalidDocumentSourceInputError('url must be an absolute https: URL')
-  }
-  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
-    throw new InvalidDocumentSourceInputError('url must be an absolute https: URL with no embedded credentials')
-  }
-  return value
-}
-
-function assertValidChecksum(value: string): string {
-  if (!CHECKSUM_PATTERN.test(value)) {
-    throw new InvalidDocumentSourceInputError('checksum must be exactly 64 lowercase hexadecimal characters')
-  }
-  return value
-}
-
-function isUniqueConstraintViolation(err: unknown): boolean {
-  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
-}
-
-interface ProjectLockRow {
-  id: string
-  status: string
-}
-
-function isProjectLockRow(value: unknown): value is ProjectLockRow {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-  const candidate = value as Record<string, unknown>
-  return typeof candidate['id'] === 'string' && typeof candidate['status'] === 'string'
-}
-
-function isProjectLockRowArray(value: unknown): value is ProjectLockRow[] {
-  return Array.isArray(value) && value.every(isProjectLockRow)
-}
-
-/**
- * Locks the project row (`SELECT ... FOR UPDATE`, Prisma-parameterized —
- * never string-concatenated) and validates it exists and is not ARCHIVED,
- * inside the caller's transaction. Must run before any DocumentSource
- * read/write in that same transaction: Postgres's row-level lock means this
- * transaction either fully completes before a concurrent
- * `transitionProjectLifecycle` archival's own `UPDATE` on the same row, or
- * fully waits for it — the two can never interleave, so a mutation can
- * never observe a stale pre-archival status and commit after the project
- * has already been serialized as ARCHIVED.
- */
-async function lockMutableProject(tx: Prisma.TransactionClient, projectId: string): Promise<void> {
-  const raw: unknown = await tx.$queryRaw`SELECT id, status FROM projects WHERE id = ${projectId}::uuid FOR UPDATE`
-
-  if (!isProjectLockRowArray(raw)) {
-    throw new Error('Unexpected result shape from project lock query')
-  }
-
-  const row = raw[0]
-  if (!row) {
-    throw new ProjectNotFoundError(projectId)
-  }
-  if (row.status === 'ARCHIVED') {
-    throw new ArchivedProjectReadOnlyError(projectId)
-  }
-}
-
-/**
- * Shared transactional envelope for every DocumentSource mutation: locks
- * and validates the owning project, then runs `run` inside the same
- * transaction. Every mutation function below goes through this single
- * implementation so all five receive identical archived-project protection.
- */
-async function withMutableProjectTransaction<T>(
-  client: PrismaClient,
-  projectId: string,
-  run: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return client.$transaction(async (tx) => {
-    await lockMutableProject(tx, projectId)
-    return run(tx)
-  })
-}
-
-/** Loads a source scoped to its owning project, inside a transaction. A source that exists but belongs to a different project is treated identically to "doesn't exist". */
-async function requireOwnedDocumentSource(
-  tx: Prisma.TransactionClient,
-  projectId: string,
-  sourceId: string,
-): Promise<DocumentSource> {
-  const source = await tx.documentSource.findUnique({ where: { id: sourceId } })
-
-  if (!source || source.projectId !== projectId) {
-    throw new DocumentSourceNotFoundError(sourceId)
-  }
-
-  return source
-}
-
-/** Read-only existence check — does NOT reject an archived project; reads remain allowed for archived projects. */
-async function requireExistingProject(client: PrismaClient, projectId: string): Promise<void> {
-  const project = await client.project.findUnique({ where: { id: projectId }, select: { id: true } })
-
-  if (!project) {
-    throw new ProjectNotFoundError(projectId)
-  }
-}
 
 export interface CreateDocumentSourceInput {
   projectId: string

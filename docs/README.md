@@ -38,6 +38,7 @@ never itself authorizes execution outside an approved Execution Contract
 |---|---|
 | [`decisions/DEC-RIC-001-github-credential-boundary.md`](decisions/DEC-RIC-001-github-credential-boundary.md) | Server-only, optional `GITHUB_TOKEN`; no credential persistence or browser/agent exposure (NDERCC-11) |
 | [`decisions/DEC-RIC-002-document-source-persistence-boundary.md`](decisions/DEC-RIC-002-document-source-persistence-boundary.md) | Project-owned `DocumentSource` registry; separated approval/sync status; no content/version storage yet (NDERCC-12) |
+| [`decisions/DEC-RIC-003-google-drive-credential-and-snapshot-boundary.md`](decisions/DEC-RIC-003-google-drive-credential-and-snapshot-boundary.md) | Server-only `GOOGLE_SERVICE_ACCOUNT_JSON`; reader-only Drive access; immutable normalized `DocumentSnapshot` with SHA-256 checksum (NDERCC-13) |
 
 ## Execution contracts
 

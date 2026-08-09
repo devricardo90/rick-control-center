@@ -11,6 +11,11 @@ const SCAN_DIRS = [
   join(ROOT, 'packages', 'domain', 'src'),
   join(ROOT, 'packages', 'application', 'src'),
   join(ROOT, 'packages', 'database', 'src'),
+  // Added by NDERCC-13: the external-provider adapters were outside this
+  // scan, so the Google Drive and GitHub clients — the code that handles
+  // untyped provider responses, and therefore the code most likely to
+  // reach for `any` — were never checked by the mandatory gate.
+  join(ROOT, 'packages', 'integrations', 'src'),
   join(ROOT, 'apps', 'web'),
 ]
 

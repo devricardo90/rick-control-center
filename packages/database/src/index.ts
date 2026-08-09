@@ -7,6 +7,7 @@
  * NDERCC-4: persistence foundation — sprint 0.
  * NDERCC-5: initial domain and persistence model.
  * NDERCC-6: single-user authentication.
+ * NDERCC-13: immutable strategic document snapshots.
  */
 export { prisma } from './client.js'
 export type { DatabaseHealthResult } from './health.js'
@@ -18,6 +19,7 @@ export {
   DuplicateDocumentSourceError,
   DuplicateProjectKeyError,
   IntegrationConnectionNotFoundError,
+  InvalidDocumentSnapshotInputError,
   InvalidDocumentSourceInputError,
   InvalidProjectTransitionError,
   ProjectNotFoundError,
@@ -94,3 +96,18 @@ export {
   recordDocumentSourceSyncSuccess,
   updateDocumentSourceRegistry,
 } from './document-source.js'
+
+export type {
+  DocumentSnapshot,
+  DocumentSnapshotSummary,
+  DocumentSnapshotSyncResult,
+  RecordDocumentSnapshotSyncInput,
+} from './document-snapshot.js'
+// Read and append only, by design — there is intentionally no snapshot
+// update or delete operation on this package's public surface (NDERCC-13).
+export {
+  findLatestDocumentSnapshot,
+  listDocumentSnapshotsForSource,
+  listLatestDocumentSnapshotsForProject,
+  recordDocumentSnapshotSync,
+} from './document-snapshot.js'

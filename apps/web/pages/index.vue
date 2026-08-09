@@ -13,9 +13,11 @@
  * for the test that keeps these literals from silently drifting out of
  * sync with the actual Prisma enums.
  */
+import type { PublicDocumentSource, PublicDocumentSyncResult } from '../server/utils/public-document-source'
+import type { DocumentSyncViewState } from '../utils/document-source-view-state'
 import type { PublicGitHubConnection } from '../server/utils/public-github-connection'
 import type { PublicProject } from '../server/utils/public-project'
-import { AUTONOMY_POLICY_OPTIONS, BRANCH_POLICY_OPTIONS } from '../utils/project-enum-options'
+import { AUTONOMY_POLICY_OPTIONS, BRANCH_POLICY_OPTIONS, DOCUMENT_TYPE_OPTIONS } from '../utils/project-enum-options'
 
 interface CreateProjectFormState {
   key: string
@@ -36,6 +38,11 @@ type LifecycleAction = 'PAUSE' | 'REACTIVATE' | 'ARCHIVE'
 interface ConnectGitHubFormState {
   owner: string
   repository: string
+}
+
+interface RegisterDocumentFormState {
+  document: string
+  documentType: string
 }
 
 // SSR runs this as a server-to-server sub-request to /api/projects, which
@@ -262,14 +269,125 @@ async function handleReverifyGitHub(): Promise<void> {
   }
 }
 
+// ── Strategic documents (NDERCC-13 / DEC-RIC-003) ──────────────────────
+// No credential ever appears here either: Google access is configured
+// entirely server-side through the GOOGLE_SERVICE_ACCOUNT_JSON handle. The
+// browser only ever sends a document link and a document type, and every
+// response is the PublicDocumentSource DTO, which has no field capable of
+// carrying a credential.
+//
+// Declared before the `selectedProjectId` watcher below for the same
+// temporal-dead-zone reason documented in the GitHub block above.
+
+const documents = ref<PublicDocumentSource[]>([])
+const documentsLoading = ref(false)
+const documentsLoadError = ref(false)
+const documentRegistering = ref(false)
+const documentRegisterError = ref('')
+const documentSyncingId = ref<string | null>(null)
+const documentSyncError = ref('')
+const documentSyncNotice = ref('')
+const registerDocumentForm = reactive<RegisterDocumentFormState>({ document: '', documentType: 'PRD' })
+
+const documentSectionViewState = computed(() =>
+  resolveDocumentSectionViewState({
+    loading: documentsLoading.value,
+    registering: documentRegistering.value,
+    hasLoadError: documentsLoadError.value,
+    documentCount: documents.value.length,
+  }),
+)
+
+function documentSyncState(source: PublicDocumentSource): DocumentSyncViewState {
+  return resolveDocumentSyncViewState({
+    syncing: documentSyncingId.value === source.id,
+    syncStatus: source.syncStatus,
+    hasSnapshot: source.latestSnapshot !== null,
+  })
+}
+
+async function loadDocuments(projectId: string): Promise<void> {
+  documentsLoading.value = true
+  documentsLoadError.value = false
+
+  try {
+    documents.value = await $fetch<PublicDocumentSource[]>(`/api/projects/${projectId}/documents`)
+  }
+  catch {
+    documentsLoadError.value = true
+    documents.value = []
+  }
+  finally {
+    documentsLoading.value = false
+  }
+}
+
+async function handleRegisterDocument(): Promise<void> {
+  const project = settingsProject.value
+  if (!project || registerDocumentForm.document.trim().length === 0) {
+    return
+  }
+
+  documentRegistering.value = true
+  documentRegisterError.value = ''
+
+  try {
+    await $fetch<PublicDocumentSource>(`/api/projects/${project.id}/documents`, {
+      method: 'POST',
+      body: { document: registerDocumentForm.document.trim(), documentType: registerDocumentForm.documentType },
+    })
+    registerDocumentForm.document = ''
+    await loadDocuments(project.id)
+  }
+  catch (err: unknown) {
+    documentRegisterError.value = extractSafeErrorMessage(err, 'Unable to register the document. Please try again.')
+  }
+  finally {
+    documentRegistering.value = false
+  }
+}
+
+async function handleSyncDocument(source: PublicDocumentSource): Promise<void> {
+  const project = settingsProject.value
+  if (!project) {
+    return
+  }
+
+  documentSyncingId.value = source.id
+  documentSyncError.value = ''
+  documentSyncNotice.value = ''
+
+  try {
+    const result = await $fetch<PublicDocumentSyncResult>(
+      `/api/projects/${project.id}/documents/${source.id}/sync`,
+      { method: 'POST' },
+    )
+    documentSyncNotice.value = result.snapshotCreated
+      ? `New snapshot captured at version ${result.source.latestSnapshot?.providerVersion ?? '—'}.`
+      : 'Document unchanged — the existing snapshot was reused.'
+  }
+  catch (err: unknown) {
+    documentSyncError.value = extractSafeErrorMessage(err, 'Unable to synchronize the document. Please try again.')
+  }
+  finally {
+    documentSyncingId.value = null
+    // Reload either way: on failure the server has already marked the
+    // source ERROR while preserving its last valid snapshot, and the UI
+    // must show that preserved state rather than guess at it.
+    await loadDocuments(project.id)
+  }
+}
+
 watch(selectedProjectId, (id) => {
   if (id === null) {
     settingsProject.value = null
     githubConnection.value = null
+    documents.value = []
     return
   }
   void loadSettings(id)
   void loadGitHubConnection(id)
+  void loadDocuments(id)
 }, { immediate: true })
 
 const isSettingsDirty = computed(() => {
@@ -877,6 +995,179 @@ function handleArchive(): void {
               {{ githubReverifying ? 'Re-verifying…' : 'Re-verify' }}
             </button>
           </div>
+        </section>
+
+        <section
+          v-if="selectedProjectId !== null && settingsProject"
+          aria-label="Strategic documents"
+          class="h-fit rounded-lg border border-border bg-background p-4"
+        >
+          <h2 class="mb-4 font-sans text-sm font-semibold text-foreground">
+            Strategic documents
+          </h2>
+
+          <p class="mb-4 text-sm text-muted-foreground">
+            Paste the link to an approved Google Doc. Google access is configured
+            server-side through the
+            <code class="font-mono">GOOGLE_SERVICE_ACCOUNT_JSON</code> handle — no
+            credential is ever entered here or anywhere in this interface. The
+            document must already be shared with the RICK service account as a
+            reader. RICK only ever reads it; it never edits a Google Doc.
+          </p>
+
+          <form
+            class="mb-4 flex flex-col gap-4 border-b border-border pb-4"
+            @submit.prevent="handleRegisterDocument"
+          >
+            <div class="flex flex-col gap-1">
+              <label
+                for="document-url"
+                class="text-sm text-muted-foreground"
+              >Google Doc URL or file ID</label>
+              <input
+                id="document-url"
+                v-model="registerDocumentForm.document"
+                type="text"
+                required
+                :disabled="documentRegistering"
+                class="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              />
+            </div>
+
+            <div class="flex flex-col gap-1">
+              <label
+                for="document-type"
+                class="text-sm text-muted-foreground"
+              >Document type</label>
+              <select
+                id="document-type"
+                v-model="registerDocumentForm.documentType"
+                :disabled="documentRegistering"
+                class="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option
+                  v-for="option in DOCUMENT_TYPE_OPTIONS"
+                  :key="option"
+                  :value="option"
+                >
+                  {{ option }}
+                </option>
+              </select>
+            </div>
+
+            <p
+              v-if="documentRegisterError"
+              class="text-sm text-red-500"
+            >
+              {{ documentRegisterError }}
+            </p>
+
+            <button
+              type="submit"
+              :disabled="documentRegistering"
+              class="rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+            >
+              {{ documentRegistering ? 'Registering…' : 'Register document' }}
+            </button>
+          </form>
+
+          <div
+            v-if="documentSectionViewState === 'loading'"
+            class="text-sm text-muted-foreground"
+          >
+            Loading documents…
+          </div>
+
+          <div
+            v-else-if="documentSectionViewState === 'registering'"
+            class="text-sm text-muted-foreground"
+          >
+            Registering document…
+          </div>
+
+          <div
+            v-else-if="documentSectionViewState === 'load-error'"
+            class="text-sm text-red-500"
+          >
+            Unable to load the registered documents. Please try again.
+          </div>
+
+          <div
+            v-else-if="documentSectionViewState === 'empty'"
+            class="text-sm text-muted-foreground"
+          >
+            No strategic documents registered yet.
+          </div>
+
+          <ul
+            v-else
+            class="flex flex-col gap-4"
+          >
+            <li
+              v-for="source in documents"
+              :key="source.id"
+              class="flex flex-col gap-1 rounded-md border border-border p-3"
+            >
+              <p class="text-sm font-medium text-foreground">
+                {{ source.title }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Type: {{ source.documentType }} · Approval: {{ source.approvalStatus }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                Sync:
+                <span :class="documentSyncState(source) === 'error' ? 'text-red-500' : ''">
+                  {{ documentSyncState(source) }}
+                </span>
+                <template v-if="source.latestSnapshot">
+                  · Version
+                  <span class="font-mono">{{ source.latestSnapshot.providerVersion }}</span>
+                  · Checksum
+                  <span class="font-mono">{{ source.latestSnapshot.checksumPrefix }}…</span>
+                </template>
+              </p>
+              <p class="text-xs text-muted-foreground">
+                <template v-if="source.lastSyncedAt">
+                  Last successful sync: {{ source.lastSyncedAt }}
+                </template>
+                <template v-else>
+                  Never synchronized.
+                </template>
+              </p>
+
+              <p
+                v-if="documentSyncState(source) === 'error'"
+                class="text-xs text-red-500"
+              >
+                The last synchronization attempt failed. The previous snapshot and
+                last successful sync shown above have been preserved.
+              </p>
+
+              <button
+                type="button"
+                :disabled="documentSyncingId !== null"
+                class="mt-2 self-start rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                @click="handleSyncDocument(source)"
+              >
+                {{ documentSyncingId === source.id
+                  ? 'Synchronizing…'
+                  : (source.latestSnapshot ? 'Re-synchronize' : 'Synchronize') }}
+              </button>
+            </li>
+          </ul>
+
+          <p
+            v-if="documentSyncError"
+            class="mt-3 text-sm text-red-500"
+          >
+            {{ documentSyncError }}
+          </p>
+          <p
+            v-else-if="documentSyncNotice"
+            class="mt-3 text-sm text-green-600 dark:text-green-500"
+          >
+            {{ documentSyncNotice }}
+          </p>
         </section>
       </div>
     </div>

@@ -3,9 +3,13 @@
  * is safe to import @rick/database here specifically to prove the
  * client-safe literal option lists never drift from the real enums.
  */
-import { AutonomyPolicy, BranchPolicy } from '@rick/database'
+import { AutonomyPolicy, BranchPolicy, DocumentType } from '@rick/database'
 import { describe, expect, it } from 'vitest'
-import { AUTONOMY_POLICY_OPTIONS, BRANCH_POLICY_OPTIONS } from '../../utils/project-enum-options'
+import {
+  AUTONOMY_POLICY_OPTIONS,
+  BRANCH_POLICY_OPTIONS,
+  DOCUMENT_TYPE_OPTIONS,
+} from '../../utils/project-enum-options'
 
 describe('project-enum-options', () => {
   it('AUTONOMY_POLICY_OPTIONS matches the real AutonomyPolicy enum exactly', () => {
@@ -14,5 +18,9 @@ describe('project-enum-options', () => {
 
   it('BRANCH_POLICY_OPTIONS matches the real BranchPolicy enum exactly', () => {
     expect([...BRANCH_POLICY_OPTIONS].sort()).toEqual(Object.values(BranchPolicy).sort())
+  })
+
+  it('DOCUMENT_TYPE_OPTIONS matches the real DocumentType enum exactly', () => {
+    expect([...DOCUMENT_TYPE_OPTIONS].sort()).toEqual(Object.values(DocumentType).sort())
   })
 })
