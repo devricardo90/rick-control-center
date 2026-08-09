@@ -280,22 +280,114 @@ describe('createGoogleDriveReader — size limits', () => {
   })
 })
 
-describe('createGoogleDriveReader — MIME type gate', () => {
-  it('rejects a non-Docs file before exporting anything', async () => {
+/**
+ * Corrective review finding 2. The MIME guard lives in the single central
+ * metadata read, so registration — which only reads metadata and never
+ * snapshots — cannot persist a non-Doc source. Both entry points are
+ * asserted, because it was previously only the snapshot path that checked.
+ */
+describe('createGoogleDriveReader — central MIME type gate', () => {
+  const unsupported = [
+    'application/vnd.google-apps.spreadsheet',
+    'application/vnd.google-apps.presentation',
+    'application/vnd.google-apps.folder',
+    'application/vnd.google-apps.form',
+    'application/pdf',
+    'text/plain',
+    'image/png',
+    'application/octet-stream',
+  ]
+
+  for (const mimeType of unsupported) {
+    it(`getGoogleDocumentMetadata rejects ${mimeType} — this is the registration path`, async () => {
+      const fetchImpl = sequencedFetch([jsonResponse(metadataBody({ mimeType }))])
+
+      await expect(reader(fetchImpl).getGoogleDocumentMetadata(FILE_ID))
+        .rejects.toBeInstanceOf(GoogleUnsupportedDocumentTypeError)
+    })
+  }
+
+  it('reports the offending MIME type without leaking anything else', async () => {
+    const fetchImpl = sequencedFetch([jsonResponse(metadataBody({ mimeType: 'application/pdf' }))])
+
+    await expect(reader(fetchImpl).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toThrow(/application\/pdf/)
+  })
+
+  it('rejects a non-Docs file on the snapshot path before exporting anything', async () => {
     const fetchImpl = sequencedFetch([jsonResponse(metadataBody({ mimeType: 'application/pdf' }))])
 
     await expect(reader(fetchImpl).snapshotGoogleDocument(FILE_ID))
       .rejects.toBeInstanceOf(GoogleUnsupportedDocumentTypeError)
+    // One call only: rejected on the first metadata read, so no export was
+    // ever requested for an unsupported file.
     expect(vi.mocked(fetchImpl).mock.calls).toHaveLength(1)
   })
 
-  it('rejects a spreadsheet and a folder MIME type', async () => {
-    for (const mimeType of ['application/vnd.google-apps.spreadsheet', 'application/vnd.google-apps.folder']) {
-      const fetchImpl = sequencedFetch([jsonResponse(metadataBody({ mimeType }))])
+  it('accepts a native Google Doc', async () => {
+    const fetchImpl = sequencedFetch([jsonResponse(metadataBody())])
 
-      await expect(reader(fetchImpl).snapshotGoogleDocument(FILE_ID))
-        .rejects.toBeInstanceOf(GoogleUnsupportedDocumentTypeError)
-    }
+    await expect(reader(fetchImpl).getGoogleDocumentMetadata(FILE_ID))
+      .resolves.toMatchObject({ mimeType: GOOGLE_DOCUMENT_MIME_TYPE })
+  })
+})
+
+/**
+ * Corrective review finding 3. `content-length` is a provider hint that can
+ * be absent or wrong, so the metadata body must be bounded by actual bytes
+ * read, before it reaches `JSON.parse`.
+ */
+describe('createGoogleDriveReader — metadata body size limit', () => {
+  /** A response whose body is real but whose content-length header lies or is missing. */
+  function bodyResponse(text: string, headers: Record<string, string> = {}): Response {
+    return new Response(text, { status: 200, headers: { 'content-type': 'application/json', ...headers } })
+  }
+
+  it('rejects an oversized declared content-length before reading the body', async () => {
+    const response = bodyResponse('{}', { 'content-length': String(1024 * 1024) })
+
+    await expect(reader(sequencedFetch([response])).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleResponseTooLargeError)
+  })
+
+  it('rejects an oversized actual metadata body when no content-length is declared', async () => {
+    // 64 KiB + slack of padding inside otherwise-valid JSON, streamed with
+    // chunked encoding so no content-length header exists at all.
+    const oversized = JSON.stringify({ ...metadataBody(), padding: 'x'.repeat(80 * 1024) })
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const bytes = new TextEncoder().encode(oversized)
+        for (let offset = 0; offset < bytes.byteLength; offset += 8192) {
+          controller.enqueue(bytes.slice(offset, offset + 8192))
+        }
+        controller.close()
+      },
+    })
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } })
+
+    expect(response.headers.get('content-length')).toBeNull()
+    await expect(reader(sequencedFetch([response])).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleResponseTooLargeError)
+  })
+
+  it('rejects an oversized actual body even when content-length understates it', async () => {
+    const oversized = JSON.stringify({ ...metadataBody(), padding: 'x'.repeat(80 * 1024) })
+    const response = bodyResponse(oversized, { 'content-length': '10' })
+
+    await expect(reader(sequencedFetch([response])).getGoogleDocumentMetadata(FILE_ID))
+      .rejects.toBeInstanceOf(GoogleResponseTooLargeError)
+  })
+
+  it('accepts valid metadata at or below the limit', async () => {
+    const withinLimit = JSON.stringify({ ...metadataBody(), padding: 'x'.repeat(1024) })
+
+    await expect(reader(sequencedFetch([bodyResponse(withinLimit)])).getGoogleDocumentMetadata(FILE_ID))
+      .resolves.toMatchObject({ id: FILE_ID, version: '23' })
+  })
+
+  it('accepts an ordinary small metadata response', async () => {
+    await expect(reader(sequencedFetch([jsonResponse(metadataBody())])).getGoogleDocumentMetadata(FILE_ID))
+      .resolves.toMatchObject({ id: FILE_ID })
   })
 })
 

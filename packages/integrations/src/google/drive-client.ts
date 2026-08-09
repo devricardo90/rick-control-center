@@ -11,6 +11,15 @@
  * URL, and no path that issues any method other than `GET` — so no Drive
  * or Docs write can originate from this adapter.
  *
+ * Two invariants are enforced centrally rather than per call site, so that
+ * every consumer inherits them (NDERCC-13 corrective review):
+ *   - `readMetadata` is the single MIME guard: anything that is not a
+ *     native Google Doc is rejected there, which is what stops a Sheet or
+ *     PDF being *registered*, not merely failing later at snapshot time;
+ *   - `readBoundedBody` is the only way a response body is consumed, and
+ *     bounds it by bytes actually read rather than trusting the declared
+ *     `content-length`.
+ *
  * Uses Node's native stable `fetch`; `google-auth-library` is confined to
  * access-token.ts and reaches this module only as an opaque
  * `GoogleAccessTokenProvider`. Both the token provider and `fetch` are
@@ -114,12 +123,59 @@ function throwForErrorStatus(status: number): never {
   throw new GoogleUpstreamError(status)
 }
 
-/** Rejects an oversized body from the declared `content-length` before it is read into memory. */
+/** Rejects an oversized body from the declared `content-length` before any of it is read. */
 function assertDeclaredSizeWithinLimit(response: Response, limitBytes: number): void {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > limitBytes) {
     throw new GoogleResponseTooLargeError(limitBytes)
   }
+}
+
+/**
+ * Reads a response body while enforcing a hard byte ceiling, and is the
+ * ONLY way this module consumes a body.
+ *
+ * `content-length` is checked first as a cheap early-out, but it is a
+ * provider-supplied hint: it can be absent (chunked transfer encoding) or
+ * simply wrong. So the stream is also counted as it arrives and cancelled
+ * the moment it crosses the limit — the bound holds regardless of what the
+ * header claimed, and an unbounded body is never fully buffered
+ * (corrective review finding 3).
+ */
+async function readBoundedBody(response: Response, limitBytes: number): Promise<Uint8Array> {
+  assertDeclaredSizeWithinLimit(response, limitBytes)
+
+  const body = response.body
+  if (body === null) {
+    return new Uint8Array()
+  }
+
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    total += value.byteLength
+    if (total > limitBytes) {
+      // Cancel to release the socket, but never let a cancellation failure
+      // replace the size error the caller actually needs to see.
+      await reader.cancel().catch(() => undefined)
+      throw new GoogleResponseTooLargeError(limitBytes)
+    }
+    chunks.push(value)
+  }
+
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,6 +247,20 @@ async function request(context: ReaderContext, url: string, accept: string): Pro
   }
 }
 
+/**
+ * The single, central MIME guard. Every metadata read passes through here,
+ * so a Sheet, Slide, PDF, folder, or uploaded binary is rejected at the
+ * adapter boundary — not later, and not only on the snapshot path.
+ *
+ * Registration therefore cannot persist a non-Doc source: it obtains its
+ * metadata through this same function (corrective review finding 2).
+ */
+function assertNativeGoogleDocument(metadata: GoogleDocumentMetadata): void {
+  if (metadata.mimeType !== GOOGLE_DOCUMENT_MIME_TYPE) {
+    throw new GoogleUnsupportedDocumentTypeError(metadata.mimeType)
+  }
+}
+
 async function readMetadata(context: ReaderContext, fileId: string): Promise<GoogleDocumentMetadata> {
   assertFileId(fileId)
 
@@ -201,17 +271,20 @@ async function readMetadata(context: ReaderContext, fileId: string): Promise<Goo
   if (!response.ok) {
     throwForErrorStatus(response.status)
   }
-  assertDeclaredSizeWithinLimit(response, MAX_METADATA_BYTES)
+
+  const bytes = await readBoundedBody(response, MAX_METADATA_BYTES)
 
   let body: unknown
   try {
-    body = await response.json()
+    body = JSON.parse(new TextDecoder('utf-8').decode(bytes))
   }
   catch {
     throw new GoogleMalformedResponseError()
   }
 
-  return narrowGoogleDocumentMetadata(body)
+  const metadata = narrowGoogleDocumentMetadata(body)
+  assertNativeGoogleDocument(metadata)
+  return metadata
 }
 
 async function readExportedText(context: ReaderContext, fileId: string): Promise<string> {
@@ -224,14 +297,8 @@ async function readExportedText(context: ReaderContext, fileId: string): Promise
   if (!response.ok) {
     throwForErrorStatus(response.status)
   }
-  assertDeclaredSizeWithinLimit(response, context.maxExportBytes)
 
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (bytes.byteLength > context.maxExportBytes) {
-    throw new GoogleResponseTooLargeError(context.maxExportBytes)
-  }
-
-  return normalizeGoogleDocumentText(bytes)
+  return normalizeGoogleDocumentText(await readBoundedBody(response, context.maxExportBytes))
 }
 
 /** One metadata/export/metadata cycle. Returns `null` when the version drifted mid-export. */
@@ -240,11 +307,9 @@ async function attemptSnapshot(
   fileId: string,
   attempt: number,
 ): Promise<GoogleDocumentSnapshot | null> {
+  // No MIME check here: `readMetadata` is the single central guard and has
+  // already rejected anything that is not a native Google Doc.
   const before = await readMetadata(context, fileId)
-  if (before.mimeType !== GOOGLE_DOCUMENT_MIME_TYPE) {
-    throw new GoogleUnsupportedDocumentTypeError(before.mimeType)
-  }
-
   const contentText = await readExportedText(context, fileId)
   const after = await readMetadata(context, fileId)
 

@@ -9,6 +9,7 @@
  *
  * NDERCC-13 / DEC-RIC-003.
  */
+import { format, inspect } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import {
   GOOGLE_SERVICE_ACCOUNT_ENV_KEY,
@@ -47,10 +48,14 @@ describe('parseGoogleServiceAccountCredential — accepted input', () => {
     expect(parseGoogleServiceAccountCredential(withoutProjectId).projectId).toBeNull()
   })
 
-  it('exposes only the three narrowed fields — private_key_id and client_id are dropped', () => {
+  it('drops private_key_id and client_id, keeping only the narrowed fields', () => {
     const credential = parseGoogleServiceAccountCredential(VALID_CREDENTIAL)
 
-    expect(Object.keys(credential).sort()).toEqual(['clientEmail', 'privateKey', 'projectId'])
+    // `privateKey` is present but deliberately non-enumerable, so it does
+    // not appear here — see the "not reachable by Node inspection" suite.
+    expect(Object.keys(credential).sort()).toEqual(['clientEmail', 'projectId'])
+    expect(Object.getOwnPropertyNames(credential)).toContain('privateKey')
+    expect(credential.privateKey).toBe(FAKE_PRIVATE_KEY)
   })
 })
 
@@ -112,18 +117,117 @@ describe('parseGoogleServiceAccountCredential — no secret ever escapes', () =>
     }
   })
 
-  it('redacts the credential when it is stringified or JSON-serialized', () => {
-    const credential = parseGoogleServiceAccountCredential(VALID_CREDENTIAL)
-
-    expect(String(credential)).not.toContain('NOT-A-REAL-KEY')
-    expect(JSON.stringify(credential)).not.toContain('NOT-A-REAL-KEY')
-    expect(`${credential}`).toBe('[redacted service-account credential]')
-  })
-
-  it('is frozen, so no caller can mutate the parsed credential in place', () => {
+  it('is frozen, so no caller can strip the redaction guards', () => {
     const credential = parseGoogleServiceAccountCredential(VALID_CREDENTIAL)
 
     expect(Object.isFrozen(credential)).toBe(true)
+  })
+})
+
+/**
+ * Corrective review finding 1. Overriding `toString`/`toJSON` did not
+ * protect `console.log(credential)`, because console formats objects with
+ * `util.inspect`, which consults neither hook. Each disclosure path a
+ * secret realistically travels through is asserted separately here, so a
+ * future refactor cannot silently reopen one of them.
+ */
+describe('parseGoogleServiceAccountCredential — private key is not reachable by Node inspection or logging', () => {
+  const credential = parseGoogleServiceAccountCredential(VALID_CREDENTIAL)
+  const KEY_FRAGMENT = 'NOT-A-REAL-KEY'
+
+  function expectRedacted(rendered: string): void {
+    expect(rendered).not.toContain(KEY_FRAGMENT)
+    expect(rendered).not.toContain('BEGIN PRIVATE KEY')
+  }
+
+  it('util.inspect does not render the private key', () => {
+    expectRedacted(inspect(credential))
+    expectRedacted(inspect(credential, { depth: null }))
+  })
+
+  it('util.inspect with showHidden does not render the private key either', () => {
+    // showHidden would otherwise reveal non-enumerable properties; the
+    // custom inspect hook is what closes this specific hole.
+    expectRedacted(inspect(credential, { showHidden: true, depth: null }))
+  })
+
+  it('console.log formatting does not render the private key', () => {
+    // `format('%s' | '%o' | '%O' | '%j')` and the bare-object form are the
+    // shapes a stray debug statement actually takes.
+    expectRedacted(format(credential))
+    expectRedacted(format('%s', credential))
+    expectRedacted(format('%o', credential))
+    expectRedacted(format('%O', credential))
+    expectRedacted(format('%j', credential))
+    expectRedacted(format('credential: %s', credential))
+  })
+
+  it('an actual console.log call does not emit the private key', () => {
+    const written: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]): void => {
+      written.push(format(...args))
+    }
+    try {
+      console.log(credential)
+      console.log('debugging', credential)
+    }
+    finally {
+      console.log = original
+    }
+
+    expect(written).toHaveLength(2)
+    for (const line of written) {
+      expectRedacted(line)
+    }
+  })
+})
+
+/** Same finding, second half: serialization and value-copying paths. */
+describe('parseGoogleServiceAccountCredential — private key is not reachable by serialization or copying', () => {
+  const credential = parseGoogleServiceAccountCredential(VALID_CREDENTIAL)
+  const KEY_FRAGMENT = 'NOT-A-REAL-KEY'
+
+  function expectRedacted(rendered: string): void {
+    expect(rendered).not.toContain(KEY_FRAGMENT)
+    expect(rendered).not.toContain('BEGIN PRIVATE KEY')
+  }
+
+  it('JSON serialization does not render the private key', () => {
+    expectRedacted(JSON.stringify(credential) ?? '')
+    expectRedacted(JSON.stringify({ nested: { credential } }))
+    expectRedacted(JSON.stringify([credential]))
+  })
+
+  it('string coercion renders a fixed redaction marker', () => {
+    expect(`${credential}`).toBe('[redacted service-account credential]')
+    expect(String(credential)).toBe('[redacted service-account credential]')
+    expectRedacted(`${credential}`)
+  })
+
+  it('enumeration and spread do not copy the private key out', () => {
+    expect(Object.keys(credential)).not.toContain('privateKey')
+    expect(Object.values(credential)).not.toContain(FAKE_PRIVATE_KEY)
+    expect(Object.entries(credential).flat()).not.toContain(FAKE_PRIVATE_KEY)
+
+    const spread = { ...credential }
+    expect('privateKey' in spread).toBe(false)
+    expectRedacted(JSON.stringify(spread))
+
+    const forInKeys: string[] = []
+    for (const key in credential) {
+      forInKeys.push(key)
+    }
+    expect(forInKeys).not.toContain('privateKey')
+  })
+
+  it('Object.assign copying does not carry the private key', () => {
+    expect('privateKey' in Object.assign({}, credential)).toBe(false)
+  })
+
+  it('still exposes the private key to direct in-process access, which the token provider needs', () => {
+    expect(credential.privateKey).toBe(FAKE_PRIVATE_KEY)
+    expect(credential.clientEmail).toBe('rick@rick-control-center.iam.gserviceaccount.com')
   })
 })
 

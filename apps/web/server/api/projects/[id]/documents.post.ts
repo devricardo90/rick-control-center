@@ -12,6 +12,12 @@
  * here — capturing content is the separate, explicit `sync` call, so
  * registering a document is always cheap and always safe.
  *
+ * That `files.get` also enforces the document type: the adapter's central
+ * MIME guard rejects anything that is not `application/vnd.google-apps.document`
+ * (mapped to HTTP 415), so a Sheet, Slide, PDF, folder or uploaded binary
+ * can never reach `createDocumentSource` and be persisted as a strategic
+ * source (NDERCC-13 corrective review, finding 2).
+ *
  * `GOOGLE_SERVICE_ACCOUNT_JSON` is never read here: the credential lives
  * behind `getGoogleDriveReader()` and never enters this handler's scope,
  * this request, or any response.
