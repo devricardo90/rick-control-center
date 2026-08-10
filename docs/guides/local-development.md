@@ -151,7 +151,120 @@ read once from the server environment and is never visible in the
 browser, never returned by any API response, and never stored in
 PostgreSQL.
 
-## 10. Validation commands
+## 10. Register and snapshot a strategic Google Doc (optional)
+
+Everything else in this guide works without any Google configuration. This
+step is required only to register and snapshot approved strategic Google
+Docs (NDERCC-13 / [DEC-RIC-003](../decisions/DEC-RIC-003-google-drive-credential-and-snapshot-boundary.md)).
+
+### 10.1 Prerequisites, once per installation
+
+1. **Create a Google Cloud project** (or reuse one) at
+   <https://console.cloud.google.com/>.
+2. **Enable the Google Drive API** for it:
+   *APIs & Services → Library → Google Drive API → Enable*.
+3. **Create a dedicated service account**:
+   *IAM & Admin → Service accounts → Create service account*. Give it a
+   name that makes its purpose obvious (e.g. `rick-control-center`). It
+   needs **no** IAM project roles — its access comes entirely from files
+   being shared with it, not from project-level permissions.
+4. **Create a JSON key** for that service account:
+   *Keys → Add key → Create new key → JSON*. Download it and treat it as a
+   password.
+5. **Copy the service-account email** (it looks like
+   `something@your-project.iam.gserviceaccount.com`).
+
+Do **not** enable domain-wide delegation, and do not grant the service
+account any broader Drive scope. Reader-only, explicitly shared access is
+the whole boundary.
+
+### 10.2 Share each approved document
+
+Open the approved Google Doc (or the folder holding your strategic
+documents), click **Share**, paste the service-account email, and set its
+role to **Viewer**. Nothing else grants access — a document that has not
+been shared is invisible to RICK, and Drive reports it identically to a
+document that does not exist.
+
+### 10.3 Configure the credential without printing it
+
+Put the **entire JSON key on one line** as `GOOGLE_SERVICE_ACCOUNT_JSON`
+in `.env`, then restart the dev server.
+
+```bash
+# .env — never commit this file
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"…","private_key":"-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n","client_email":"…"}
+```
+
+Some safe habits while doing this:
+
+- do not `cat`, `echo`, or `console.log` the value, and do not paste it
+  into a terminal that is being recorded or screen-shared;
+- delete the downloaded JSON file from `~/Downloads` once it is in `.env`;
+- to confirm it is set without revealing it, check only that it is
+  non-empty — e.g. `[ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ] && echo present`.
+
+The application never stores this value in PostgreSQL, never sends it to
+the browser, never returns it from an API, and never logs it. It is read
+once, in `apps/web/server/utils/google-drive-reader.ts`, and stays inside
+the token provider.
+
+### 10.4 Snapshot flow
+
+Select a project's settings and find the **Strategic documents** section:
+
+1. Paste the Google Doc link (or its bare file ID) and choose a document
+   type. Click **Register document** — this performs a single read-only
+   metadata call to confirm the service account can see the document and
+   to capture its real title.
+2. Click **Synchronize**. RICK reads the document's version, exports it as
+   plain text, re-reads the version to confirm it did not change mid-read,
+   normalizes the text, and stores an immutable snapshot with a SHA-256
+   checksum.
+3. The row then shows the provider version, a checksum prefix, and the
+   last successful sync time.
+4. Click **Re-synchronize** on an unchanged document: it reports
+   *"Document unchanged — the existing snapshot was reused"* and appends no
+   duplicate row. Edit the document in Google and re-synchronize to see a
+   new version and a new checksum, with the previous snapshot still
+   preserved in history.
+
+RICK only ever reads. There is no code path in this application that
+writes to Google Drive or Google Docs.
+
+### 10.5 Troubleshooting Google access
+
+| What you see | What it usually means |
+|---|---|
+| **"This document does not exist or is not shared with the RICK service account."** (HTTP 422) | Drive returned `404`. Either the file ID is wrong, or the document was never shared with the service-account email. Drive deliberately does not distinguish the two, so neither do we — re-check the share dialog first. |
+| **"Google Drive is temporarily unavailable."** (HTTP 503) | Covers a missing/invalid `GOOGLE_SERVICE_ACCOUNT_JSON` (`401`), a permission denial (`403`), rate limiting (`429`), a request timeout, or a network failure. Check the handle is set and the server was restarted; if the document is large or Drive is slow, retry. |
+| **"Only native Google Docs can be registered and snapshotted."** (HTTP 415) | The link points at a PDF, a Sheet, a Slide, or an uploaded file. Only `application/vnd.google-apps.document` can be exported as text. |
+| **"The document changed while it was being read."** (HTTP 409) | Someone was editing the document during all three read attempts. Nothing was corrupted and the previous snapshot is intact — retry when editing has settled. |
+| **"Provide a valid Google Docs URL or file ID."** (HTTP 400) | The reference was not a `docs.google.com` / `drive.google.com` link, was a folder link, or contained no single unambiguous file ID. |
+| **"Google returned a response this application cannot accept."** (HTTP 502) | Drive answered, but with an unparseable body or a document larger than the 5 MiB export limit. |
+
+Note that a **failed** synchronization never destroys anything: the
+source moves to `ERROR`, and its previous revision, checksum, metadata,
+`lastSyncedAt`, and every stored snapshot are left exactly as they were.
+
+### 10.6 Rotation and revocation
+
+- **Revoke immediately:** delete the key in *IAM & Admin → Service
+  accounts → Keys*. Access stops at once, with no code change or deploy.
+  Deleting the whole service account, or removing its Viewer access on the
+  documents, also works.
+- **Rotate:** create a new JSON key, replace `GOOGLE_SERVICE_ACCOUNT_JSON`,
+  restart the server, verify one synchronization succeeds, then delete the
+  old key in Google Cloud.
+- **If the key is ever exposed** — pasted into a log, a commit, a ticket,
+  or a chat — treat it as compromised: delete that key first, then rotate.
+- **Production direction:** a user-managed key is an accepted bootstrap
+  mechanism for a runtime outside Google Cloud, not the intended end
+  state. Workload Identity Federation is the preferred keyless path and
+  can replace the key without changing the adapter or domain contract
+  (DEC-RIC-003 §7). Adopting it is a separate, future decision.
+
+## 11. Validation commands
 
 Run these from the repository root before considering any change ready:
 
@@ -172,7 +285,7 @@ applied before you run it, exactly as in CI
 (see [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), which
 provisions its own disposable PostgreSQL service for the same reason).
 
-## 11. Resetting the local database
+## 12. Resetting the local database
 
 To return to a completely clean database:
 
@@ -185,7 +298,7 @@ pnpm db:migrate:deploy   # reapply all migrations
 After a reset, the operator no longer exists — run `pnpm auth:bootstrap`
 again before logging in.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 **Port `5432` (PostgreSQL) or `3000` (Nuxt) is already in use**
 Another process — including a previous `docker compose up -d` you forgot
@@ -239,7 +352,7 @@ repository's previously verified information (if any) is left untouched;
 only its status moves to `ERROR`. Try again, or check `GITHUB_TOKEN` if
 the repository is private.
 
-## 13. Security reminders
+## 14. Security reminders
 
 - Never commit `.env` — it is already git-ignored; keep it that way, and
   never paste its contents into a commit message, a Jira comment, or a log.
@@ -258,3 +371,13 @@ the repository is private.
   application only ever calls `GET /repos/{owner}/{repo}`, never a write
   endpoint. It is never stored in PostgreSQL, never returned by any API
   response, and never logged. Restart the server after changing it.
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (NDERCC-13 / DEC-RIC-003) is optional and
+  server-only, but unlike `GITHUB_TOKEN` it is a **private key** — treat it
+  with the same care as a production password. It is read in exactly one
+  module, never persisted, never sent to the browser, never returned by any
+  API, and never logged; the parsed credential is frozen and redacts itself
+  if something tries to stringify it. Do not defeat that by printing the
+  raw environment variable while debugging. Scope it by sharing only the
+  specific documents RICK needs, as Viewer. If it is ever exposed, delete
+  the key in Google Cloud immediately (§10.6) — revocation is instant and
+  needs no deploy.

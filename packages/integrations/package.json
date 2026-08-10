@@ -9,6 +9,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "google-auth-library": "10.9.1"
+  },
   "devDependencies": {
     "typescript": "^5.8.0"
   }

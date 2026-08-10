@@ -80,3 +80,17 @@ export class InvalidDocumentSourceInputError extends Error {
     this.name = 'InvalidDocumentSourceInputError'
   }
 }
+
+/**
+ * Snapshot input failed a domain validation rule (NDERCC-13). The most
+ * important case is a checksum that does not match the content it is
+ * stored alongside — the persistence layer recomputes the digest rather
+ * than trusting the caller, so an immutable snapshot row can never claim a
+ * checksum its own `contentText` does not produce.
+ */
+export class InvalidDocumentSnapshotInputError extends Error {
+  constructor(reason: string) {
+    super(`Invalid document snapshot input: ${reason}`)
+    this.name = 'InvalidDocumentSnapshotInputError'
+  }
+}

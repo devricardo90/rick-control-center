@@ -135,6 +135,7 @@ model Project {
 
   integrationConnections IntegrationConnection[]
   documentSources        DocumentSource[]
+  documentSnapshots      DocumentSnapshot[]
 
   @@map("projects")
 }
@@ -176,9 +177,11 @@ model IntegrationConnection {
 }
 
 // Project-owned strategic document registry entry (NDERCC-12 / DEC-RIC-002).
-// Persistence and provenance only — no document body content, snapshot, or
-// version history exists here; that is explicitly deferred to a future,
-// separately-decided NDERCC-13 slice.
+// Persistence and provenance only — no document body content lives on this
+// model. Content snapshots were deferred by DEC-RIC-002 to NDERCC-13 and
+// now exist as the separate immutable `DocumentSnapshot` aggregate below;
+// this model still carries only the *current* synchronization pointer
+// (revision/checksum/syncStatus/lastSyncedAt).
 model DocumentSource {
   id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   projectId      String                 @map("project_id") @db.Uuid
@@ -202,7 +205,8 @@ model DocumentSource {
 
   // Restrict, not cascade: strategic document provenance must never be
   // silently lost by deleting its owning Project (DEC-RIC-002).
-  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  project   Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  snapshots DocumentSnapshot[]
 
   // The same provider file may be registered only once per project, but
   // independently in a different project — and a project may register more
@@ -210,9 +214,74 @@ model DocumentSource {
   // uniqueness rule, decides which is authoritative), so no uniqueness on
   // (projectId, documentType) is added.
   @@unique([projectId, provider, externalFileId], map: "document_sources_project_provider_external_file_key")
+  // Referenced by DocumentSnapshot's composite foreign key. `id` is
+  // already unique on its own, so this adds no new restriction on
+  // document_sources — it exists solely to give the snapshot table a
+  // (source, project) pair to point at, which is what makes
+  // "a snapshot's project always equals its source's project" a
+  // database-enforced invariant rather than an application convention.
+  @@unique([id, projectId], map: "document_sources_id_project_key")
   @@index([projectId])
   @@index([projectId, documentType])
   @@map("document_sources")
+}
+
+// Immutable, project-owned content snapshot of one strategic document at
+// one provider version (NDERCC-13 / DEC-RIC-003).
+//
+// Append-only by design and by API: `packages/database/src/document-snapshot.ts`
+// exposes create-and-read operations only — there is deliberately no
+// update or delete function for this model anywhere in the package's
+// public surface, and no `updatedAt` column, because a snapshot that could
+// be edited after the fact would no longer be evidence of what the
+// document actually said.
+//
+// `contentText` is the ONLY place in the schema authorized to hold
+// document body content. Credentials, OAuth tokens, request/response
+// headers and raw Google response payloads are never stored on this model
+// — there is no column capable of carrying them.
+model DocumentSnapshot {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId          String    @map("project_id") @db.Uuid
+  documentSourceId   String    @map("document_source_id") @db.Uuid
+  // Drive `files.version` as a string — DEC-RIC-003 rejects revision
+  // history as the canonical identity because reader-only access cannot
+  // read it.
+  providerVersion    String    @map("provider_version")
+  // Canonically normalized UTF-8 text (NFC, LF endings, BOM removed).
+  contentText        String    @map("content_text")
+  // Lowercase SHA-256 hex over `contentText` — must always match it.
+  checksum           String
+  providerModifiedAt DateTime? @db.Timestamptz(3) @map("provider_modified_at")
+  syncedAt           DateTime  @db.Timestamptz(3) @map("synced_at")
+  createdAt          DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
+
+  // Restrict on both edges: an immutable strategic snapshot must never be
+  // silently destroyed by deleting its project or its source row.
+  //
+  // The DocumentSource edge is a COMPOSITE key on (documentSourceId,
+  // projectId) rather than the source id alone. That makes cross-project
+  // contamination structurally impossible: a row claiming source S while
+  // naming project P is rejected by PostgreSQL unless S genuinely belongs
+  // to P — the isolation rule is enforced by the database, not only by the
+  // transactional checks in src/document-snapshot.ts.
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documentSource DocumentSource @relation(fields: [documentSourceId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+
+  // Re-synchronizing an unchanged document must not append a duplicate
+  // row: the same source at the same provider version with the same
+  // content is one snapshot, and the sync path reuses it idempotently.
+  // Checksum participates so that the pathological case of Drive reusing a
+  // version number for changed content still records a distinct snapshot
+  // rather than being silently swallowed.
+  @@unique([documentSourceId, providerVersion, checksum], map: "document_snapshots_source_version_checksum_key")
+  @@index([projectId])
+  @@index([documentSourceId])
+  // Deterministic newest-snapshot lookup: `createdAt` alone can tie within
+  // the same millisecond, so `id` is the stable tiebreaker and is part of
+  // the index rather than an unindexed sort.
+  @@index([documentSourceId, createdAt(sort: Desc), id(sort: Desc)], map: "document_snapshots_source_newest_idx")
+  @@map("document_snapshots")
 }
 
 // The installation's single primary operator. `singleton` is always `true`.
