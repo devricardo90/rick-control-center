@@ -8,3 +8,22 @@
  */
 
 export type { ProjectId, ContractId, RunId, AuditId, Result, Ok, Err } from '@rick/shared'
+
+export {
+  DecisionStatus,
+  hasBlockingDiagnostics,
+  parseStrategicTruth,
+  RequirementPriority,
+  RequirementStatus,
+  RequirementType,
+  STRATEGIC_TRUTH_EXTRACTOR_VERSION,
+} from './strategic-truth.js'
+export type {
+  DecisionCandidate,
+  ExtractionDiagnostic,
+  ExtractionDiagnosticCode,
+  ExtractionDiagnosticSeverity,
+  RequirementCandidate,
+  StrategicSourceLocator,
+  StrategicTruthCandidate,
+} from './strategic-truth.js'
