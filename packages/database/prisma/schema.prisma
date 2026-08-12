@@ -119,6 +119,41 @@ enum DocumentSyncStatus {
   @@map("document_sync_status")
 }
 
+// DEC-RIC-004 / NDERCC-16: deterministic strategic-truth projection.
+enum RequirementType {
+  FUNCTIONAL
+  NON_FUNCTIONAL
+  CONSTRAINT
+
+  @@map("requirement_type")
+}
+
+enum RequirementPriority {
+  P0
+  P1
+  P2
+  P3
+  UNSPECIFIED
+
+  @@map("requirement_priority")
+}
+
+enum RequirementStatus {
+  ACTIVE
+  SUPERSEDED
+
+  @@map("requirement_status")
+}
+
+enum DecisionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  SUPERSEDED
+
+  @@map("decision_status")
+}
+
 // Root isolation aggregate. Every operational entity belongs to a Project.
 model Project {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -136,6 +171,8 @@ model Project {
   integrationConnections IntegrationConnection[]
   documentSources        DocumentSource[]
   documentSnapshots      DocumentSnapshot[]
+  requirements           Requirement[]
+  decisions              Decision[]
 
   @@map("projects")
 }
@@ -207,6 +244,8 @@ model DocumentSource {
   // silently lost by deleting its owning Project (DEC-RIC-002).
   project   Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   snapshots DocumentSnapshot[]
+  requirements Requirement[]
+  decisions Decision[]
 
   // The same provider file may be registered only once per project, but
   // independently in a different project — and a project may register more
@@ -268,6 +307,9 @@ model DocumentSnapshot {
   project        Project        @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   documentSource DocumentSource @relation(fields: [documentSourceId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
 
+  requirements Requirement[]
+  decisions Decision[]
+
   // Re-synchronizing an unchanged document must not append a duplicate
   // row: the same source at the same provider version with the same
   // content is one snapshot, and the sync path reuses it idempotently.
@@ -275,6 +317,7 @@ model DocumentSnapshot {
   // version number for changed content still records a distinct snapshot
   // rather than being silently swallowed.
   @@unique([documentSourceId, providerVersion, checksum], map: "document_snapshots_source_version_checksum_key")
+  @@unique([id, projectId], map: "document_snapshots_id_project_key")
   @@index([projectId])
   @@index([documentSourceId])
   // Deterministic newest-snapshot lookup: `createdAt` alone can tie within
@@ -282,6 +325,72 @@ model DocumentSnapshot {
   // the index rather than an unindexed sort.
   @@index([documentSourceId, createdAt(sort: Desc), id(sort: Desc)], map: "document_snapshots_source_newest_idx")
   @@map("document_snapshots")
+}
+
+// Project-owned current projection of an explicitly extracted requirement.
+// Constraints intentionally use this model with type = CONSTRAINT; there is
+// no second aggregate for inferred/opaque constraints (DEC-RIC-004).
+model Requirement {
+  id                   String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId            String              @map("project_id") @db.Uuid
+  code                 String
+  title                String
+  description          String
+  type                 RequirementType
+  priority             RequirementPriority @default(UNSPECIFIED)
+  status               RequirementStatus   @default(ACTIVE)
+  documentSourceId     String              @map("document_source_id") @db.Uuid
+  sourceSnapshotId     String              @map("source_snapshot_id") @db.Uuid
+  acceptanceCriteriaJson Json?             @map("acceptance_criteria_json")
+  extractorVersion     String              @map("extractor_version")
+  sourceLocatorJson    Json                @map("source_locator_json")
+  createdAt            DateTime            @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt            DateTime            @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documentSource DocumentSource @relation(fields: [documentSourceId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  sourceSnapshot DocumentSnapshot @relation(fields: [sourceSnapshotId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([projectId, code], map: "requirements_project_code_key")
+  @@index([projectId, status], map: "requirements_project_status_idx")
+  @@index([documentSourceId], map: "requirements_document_source_idx")
+  @@index([sourceSnapshotId], map: "requirements_source_snapshot_idx")
+  @@map("requirements")
+}
+
+// Project-owned current projection of an explicitly canonical DEC record.
+// Optional fields remain null when the source did not state them; no prose is
+// promoted to a decision by this model or its persistence surface.
+model Decision {
+  id                   String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId            String         @map("project_id") @db.Uuid
+  code                 String
+  title                String
+  context              String?
+  chosenDecision       String         @map("chosen_decision")
+  consequences         String?
+  status               DecisionStatus @default(PROPOSED)
+  supersedesDecisionId String?        @map("supersedes_decision_id") @db.Uuid
+  decidedAt            DateTime?      @db.Timestamptz(3) @map("decided_at")
+  documentSourceId     String         @map("document_source_id") @db.Uuid
+  sourceSnapshotId     String         @map("source_snapshot_id") @db.Uuid
+  extractorVersion     String         @map("extractor_version")
+  sourceLocatorJson    Json           @map("source_locator_json")
+  createdAt            DateTime       @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt            DateTime       @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  documentSource DocumentSource @relation(fields: [documentSourceId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  sourceSnapshot DocumentSnapshot @relation(fields: [sourceSnapshotId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  supersedes     Decision?      @relation("DecisionSupersession", fields: [supersedesDecisionId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  supersededBy   Decision[]     @relation("DecisionSupersession")
+
+  @@unique([id, projectId], map: "decisions_id_project_key")
+  @@unique([projectId, code], map: "decisions_project_code_key")
+  @@index([projectId, status], map: "decisions_project_status_idx")
+  @@index([documentSourceId], map: "decisions_document_source_idx")
+  @@index([sourceSnapshotId], map: "decisions_source_snapshot_idx")
+  @@map("decisions")
 }
 
 // The installation's single primary operator. `singleton` is always `true`.

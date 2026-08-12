@@ -97,6 +97,9 @@ importers:
       '@prisma/client':
         specifier: ^7.9.1
         version: 7.9.1(prisma@7.9.1(@types/react@19.2.17)(magicast@0.5.3)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3))(typescript@5.9.3)
+      '@rick/domain':
+        specifier: workspace:*
+        version: link:../domain
       pg:
         specifier: ^8.22.0
         version: 8.22.0

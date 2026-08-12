@@ -94,3 +94,45 @@ export class InvalidDocumentSnapshotInputError extends Error {
     this.name = 'InvalidDocumentSnapshotInputError'
   }
 }
+
+/** No immutable snapshot with this id exists for the requested project. */
+export class DocumentSnapshotNotFoundError extends Error {
+  constructor(public readonly snapshotId: string) {
+    super(`Document snapshot not found: ${snapshotId}`)
+    this.name = 'DocumentSnapshotNotFoundError'
+  }
+}
+
+/** The source/snapshot pair is not an approved current extraction input. */
+export class StrategicTruthSourceNotEligibleError extends Error {
+  constructor(
+    public readonly projectId: string,
+    public readonly documentSourceId: string,
+    public readonly sourceSnapshotId: string,
+    public readonly reason: string,
+  ) {
+    super(`Strategic truth source is not eligible for extraction: ${reason}`)
+    this.name = 'StrategicTruthSourceNotEligibleError'
+  }
+}
+
+/** A candidate could not be trusted because deterministic parsing found an error. */
+export class StrategicTruthParseError extends Error {
+  constructor(public readonly diagnostics: readonly string[]) {
+    super('Strategic truth candidate is ambiguous or unsupported')
+    this.name = 'StrategicTruthParseError'
+  }
+}
+
+/** A trusted explicit code already belongs to another document source. */
+export class StrategicTruthSourceConflictError extends Error {
+  constructor(
+    public readonly projectId: string,
+    public readonly code: string,
+    public readonly existingDocumentSourceId: string,
+    public readonly candidateDocumentSourceId: string,
+  ) {
+    super(`Strategic truth source conflict for ${code}`)
+    this.name = 'StrategicTruthSourceConflictError'
+  }
+}

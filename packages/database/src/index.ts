@@ -23,6 +23,10 @@ export {
   InvalidDocumentSourceInputError,
   InvalidProjectTransitionError,
   ProjectNotFoundError,
+  DocumentSnapshotNotFoundError,
+  StrategicTruthParseError,
+  StrategicTruthSourceConflictError,
+  StrategicTruthSourceNotEligibleError,
 } from './errors.js'
 
 export type {
@@ -111,3 +115,39 @@ export {
   listLatestDocumentSnapshotsForProject,
   recordDocumentSnapshotSync,
 } from './document-snapshot.js'
+
+export type {
+  DecisionRecord,
+  RequirementRecord,
+  StrategicTruthExtractionInput,
+  StrategicTruthExtractionResult,
+  StrategicTruthCounts,
+} from './strategic-truth.js'
+export {
+  extractAndReconcileStrategicTruth,
+  extractStrategicTruth,
+  findCurrentDecisionByCode,
+  findCurrentRequirementByCode,
+  listCurrentDecisionsByProject,
+  listCurrentRequirementsByProject,
+  listDecisionsByProject,
+  listRequirementsByProject,
+} from './strategic-truth.js'
+
+export {
+  parseStrategicTruth,
+  DecisionStatus,
+  RequirementPriority,
+  RequirementStatus,
+  RequirementType,
+  STRATEGIC_TRUTH_EXTRACTOR_VERSION,
+} from '@rick/domain'
+export type {
+  DecisionCandidate,
+  ExtractionDiagnostic,
+  ExtractionDiagnosticCode,
+  ExtractionDiagnosticSeverity,
+  RequirementCandidate,
+  StrategicSourceLocator,
+  StrategicTruthCandidate,
+} from '@rick/domain'
