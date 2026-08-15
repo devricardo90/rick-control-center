@@ -333,8 +333,37 @@ describe('validateExternalIdentity', () => {
     expect(validateExternalIdentity({ externalProvider: BacklogExternalProvider.JIRA }).ok).toBe(true)
   })
 
-  it('treats a blank externalId as absent', () => {
-    expect(validateExternalIdentity({ externalId: '   ' }).ok).toBe(true)
+  // IR-NDERCC-17-001: a blank string is not "no external identity". It is a
+  // malformed one, and a blank value can never be a provider-stable
+  // identifier — so it is rejected rather than quietly treated as absent.
+  it.each(['', '   ', '\t', '\n', ' \t\n '])('rejects a blank externalId %j with no provider', (externalId) => {
+    expect(validateExternalIdentity({ externalId }).ok).toBe(false)
+  })
+
+  it.each(['', '   ', '\t\n'])('rejects a blank externalId %j even with a provider', (externalId) => {
+    expect(validateExternalIdentity({
+      externalProvider: BacklogExternalProvider.JIRA,
+      externalId,
+    }).ok).toBe(false)
+  })
+
+  it('names externalId in the blank-value failure reason', () => {
+    const result = validateExternalIdentity({ externalId: '   ' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('externalId')
+    }
+  })
+
+  it('still accepts an explicit null as a clear instruction', () => {
+    expect(validateExternalIdentity({ externalId: null }).ok).toBe(true)
+    expect(validateExternalIdentity({ externalProvider: null, externalId: null }).ok).toBe(true)
+  })
+
+  it('still accepts undefined as "leave unchanged"', () => {
+    expect(validateExternalIdentity({ externalId: undefined }).ok).toBe(true)
+    expect(validateExternalIdentity({ externalProvider: BacklogExternalProvider.JIRA, externalId: undefined }).ok)
+      .toBe(true)
   })
 })
 

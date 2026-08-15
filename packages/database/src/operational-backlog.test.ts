@@ -778,6 +778,233 @@ describe('external identity partial updates', () => {
   })
 })
 
+// IR-NDERCC-17-001 — a blank externalId must never become planning state.
+// Covers the shared validator through both aggregates and both write paths.
+describe('external identity — blank rejection (IR-NDERCC-17-001)', () => {
+  const BLANK_IDS = ['', '   ', '\t', '\n', ' \t\n ']
+
+  it.each(BLANK_IDS)('rejects a blank externalId %j when creating a task without a provider', async (externalId) => {
+    const project = await seedProject('ir1-task-noprov')
+    const sprint = await seedSprint(project.id)
+
+    await expect(createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Blank id',
+      priority: 'P1',
+      sequence: 0,
+      externalId,
+    })).rejects.toThrow(InvalidBacklogInputError)
+  })
+
+  it.each(BLANK_IDS)('rejects a blank externalId %j when creating a task with a provider', async (externalId) => {
+    const project = await seedProject('ir1-task-prov')
+    const sprint = await seedSprint(project.id)
+
+    await expect(createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Blank id',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+    })).rejects.toThrow(InvalidBacklogInputError)
+  })
+
+  it.each(BLANK_IDS)('rejects a blank externalId %j when creating an epic', async (externalId) => {
+    const project = await seedProject('ir1-epic')
+    const sprint = await seedSprint(project.id)
+
+    await expect(createEpic(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('epi'),
+      title: 'Blank id',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+    })).rejects.toThrow(InvalidBacklogInputError)
+  })
+})
+
+describe('external identity — blank never reaches the row (IR-NDERCC-17-001)', () => {
+  it('never persists a blank externalId, and never silently converts it to null', async () => {
+    const project = await seedProject('ir1-nopersist')
+    const sprint = await seedSprint(project.id)
+
+    await expect(createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Blank id',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId: '   ',
+    })).rejects.toThrow(InvalidBacklogInputError)
+
+    // The create was rejected outright — no row exists at all, so there is
+    // neither a blank nor a null-coerced external identity in the database.
+    expect(await listTasksForSprint(client, project.id, sprint.id)).toEqual([])
+  })
+
+  it('rejects a blank externalId on the task update path and leaves the record unchanged', async () => {
+    const project = await seedProject('ir1-task-update')
+    const sprint = await seedSprint(project.id)
+    const externalId = uniqueSlug('jira')
+    const task = await createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Traced',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+      externalKey: 'NDERCC-17',
+    })
+
+    await expect(updateTaskPlanning(client, project.id, task.id, { externalId: '   ' }))
+      .rejects.toThrow(InvalidBacklogInputError)
+
+    const unchanged = await findTaskForProject(client, project.id, task.id)
+    expect(unchanged?.externalId).toBe(externalId)
+    expect(unchanged?.externalProvider).toBe('JIRA')
+    expect(unchanged?.externalKey).toBe('NDERCC-17')
+  })
+})
+
+describe('external identity — blank rejection on epic update (IR-NDERCC-17-001)', () => {
+  it('rejects a blank externalId on the epic update path and leaves the record unchanged', async () => {
+    const project = await seedProject('ir1-epic-update')
+    const sprint = await seedSprint(project.id)
+    const externalId = uniqueSlug('jira')
+    const epic = await createEpic(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('epi'),
+      title: 'Traced',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+    })
+
+    await expect(updateEpicPlanning(client, project.id, epic.id, { externalId: '' }))
+      .rejects.toThrow(InvalidBacklogInputError)
+
+    const unchanged = await findEpicForProject(client, project.id, epic.id)
+    expect(unchanged?.externalId).toBe(externalId)
+    expect(unchanged?.externalProvider).toBe('JIRA')
+  })
+
+  it('rejects a blank externalId even when the update also clears the provider', async () => {
+    const project = await seedProject('ir1-both')
+    const sprint = await seedSprint(project.id)
+    const externalId = uniqueSlug('jira')
+    const task = await createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Traced',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+    })
+
+    await expect(updateTaskPlanning(client, project.id, task.id, {
+      externalProvider: null,
+      externalId: '  ',
+    })).rejects.toThrow(InvalidBacklogInputError)
+
+    const unchanged = await findTaskForProject(client, project.id, task.id)
+    expect(unchanged?.externalId).toBe(externalId)
+  })
+})
+
+describe('external identity — valid cases preserved (IR-NDERCC-17-001)', () => {
+  it('still accepts a valid non-empty external identity on create and update', async () => {
+    const project = await seedProject('ir1-valid')
+    const sprint = await seedSprint(project.id)
+    const first = uniqueSlug('jira')
+    const second = uniqueSlug('jira')
+
+    const task = await createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Traced',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId: first,
+    })
+    expect(task.externalId).toBe(first)
+
+    const updated = await updateTaskPlanning(client, project.id, task.id, { externalId: second })
+    expect(updated.externalId).toBe(second)
+    expect(updated.externalProvider).toBe('JIRA')
+  })
+
+  it('still accepts explicit null clearing after the blank rule', async () => {
+    const project = await seedProject('ir1-clear')
+    const sprint = await seedSprint(project.id)
+    const task = await createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Traced',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId: uniqueSlug('jira'),
+    })
+
+    const cleared = await updateTaskPlanning(client, project.id, task.id, {
+      externalProvider: null,
+      externalId: null,
+    })
+
+    expect(cleared.externalProvider).toBeNull()
+    expect(cleared.externalId).toBeNull()
+  })
+})
+
+describe('external identity — partial-update semantics preserved (IR-NDERCC-17-001)', () => {
+  it('still treats undefined as "leave unchanged"', async () => {
+    const project = await seedProject('ir1-undef')
+    const sprint = await seedSprint(project.id)
+    const externalId = uniqueSlug('jira')
+    const task = await createTask(client, {
+      projectId: project.id,
+      sprintId: sprint.id,
+      code: uniqueSlug('tsk'),
+      type: 'TASK',
+      title: 'Traced',
+      priority: 'P1',
+      sequence: 0,
+      externalProvider: 'JIRA',
+      externalId,
+    })
+
+    const retitled = await updateTaskPlanning(client, project.id, task.id, { title: 'Renamed' })
+
+    expect(retitled.title).toBe('Renamed')
+    expect(retitled.externalId).toBe(externalId)
+    expect(retitled.externalProvider).toBe('JIRA')
+  })
+})
+
 // ── Dependencies ──────────────────────────────────────────────────────────────
 
 describe('task dependencies', () => {

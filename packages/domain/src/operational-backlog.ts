@@ -334,11 +334,27 @@ export interface ExternalIdentityInput {
  * An `externalId` is meaningless without the provider that issued it, so the
  * provider is required whenever an id is present (DEC-RIC-005 §4). The
  * reverse is allowed: a provider may be recorded before its id is known.
+ *
+ * A blank or whitespace-only string is rejected rather than treated as
+ * absent (IR-NDERCC-17-001). `externalId` is defined as a provider-stable
+ * identifier, and a blank value is not one — it is a malformed identity.
+ * Treating it as "no identity" would let it slip past the provider-required
+ * rule and then be written to the row verbatim, since `?? null` does not
+ * catch an empty string. "No identity" is spelled `null` (clear) or
+ * `undefined` (leave unchanged); both remain accepted.
  */
 export function validateExternalIdentity(input: ExternalIdentityInput): BacklogValidation<null> {
-  const hasExternalId = typeof input.externalId === 'string' && input.externalId.trim().length > 0
+  const { externalId, externalProvider } = input
 
-  if (hasExternalId && (input.externalProvider === undefined || input.externalProvider === null)) {
+  if (typeof externalId !== 'string') {
+    return ok(null)
+  }
+
+  if (externalId.trim().length === 0) {
+    return err('externalId must not be blank; use null to clear it')
+  }
+
+  if (externalProvider === undefined || externalProvider === null) {
     return err('externalProvider is required when externalId is present')
   }
 
