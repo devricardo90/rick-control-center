@@ -154,6 +154,76 @@ enum DecisionStatus {
   @@map("decision_status")
 }
 
+// DEC-RIC-005 / NDERCC-17: operational backlog lifecycle. Sprint and Epic
+// share the same four states and the same transition table, but stay
+// separate enums so one can evolve later without silently redefining the
+// other.
+enum SprintStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("sprint_status")
+}
+
+enum EpicStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("epic_status")
+}
+
+// READY, BLOCKED, AMBIGUOUS and CONFLICT are deliberately absent: they are
+// resolver/diagnostic outcomes owned by P0-031/P0-032 and must be computed,
+// never persisted (DEC-RIC-005 §5). Persisting them would let stored
+// lifecycle state drift away from deterministic dependency evaluation.
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+  CANCELLED
+
+  @@map("task_status")
+}
+
+// The RIC-006 initial task types, unchanged.
+enum TaskType {
+  STORY
+  TASK
+  BUG
+  SPIKE
+  CHORE
+
+  @@map("task_type")
+}
+
+// P0 (highest) through P3. There is deliberately no UNSPECIFIED member —
+// unlike RequirementPriority above, an operational Task must always carry an
+// explicit, human-set priority, and priority is never inferred from wording,
+// Jira order or creation time (DEC-RIC-005 §7).
+enum TaskPriority {
+  P0
+  P1
+  P2
+  P3
+
+  @@map("task_priority")
+}
+
+// Provenance only. JIRA is the single authorized member today; adding
+// another provider requires a later migration and a new decision. This is
+// separate from `IntegrationProvider` because that enum names connection
+// targets, whereas this one names the origin of a backlog record.
+enum BacklogExternalProvider {
+  JIRA
+
+  @@map("backlog_external_provider")
+}
+
 // Root isolation aggregate. Every operational entity belongs to a Project.
 model Project {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -173,6 +243,10 @@ model Project {
   documentSnapshots      DocumentSnapshot[]
   requirements           Requirement[]
   decisions              Decision[]
+  sprints                Sprint[]
+  epics                  Epic[]
+  tasks                  Task[]
+  taskDependencies       TaskDependency[]
 
   @@map("projects")
 }
@@ -391,6 +465,202 @@ model Decision {
   @@index([documentSourceId], map: "decisions_document_source_idx")
   @@index([sourceSnapshotId], map: "decisions_source_snapshot_idx")
   @@map("decisions")
+}
+
+// Project-owned planning container and the root of the operational backlog
+// hierarchy (NDERCC-17 / DEC-RIC-005).
+//
+// `sequence` is explicit planning order — deliberately NOT createdAt order,
+// so re-planning is an intentional data change rather than an artifact of
+// insertion timing. Sequence alone is not an eligibility decision: P0-031
+// owns actual next-item ranking and is not implemented here.
+//
+// No `roadmapItemId` exists. RoadmapItem persistence is deferred from this
+// slice by DEC-RIC-005 §1 and must not be introduced without a later
+// approved decision.
+model Sprint {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String       @map("project_id") @db.Uuid
+  // Immutable, human-readable local identity, unique per Project. Local
+  // identity never depends on Jira being connected (DEC-RIC-005 §3).
+  code           String
+  title          String
+  objective      String?
+  status         SprintStatus @default(PLANNED)
+  sequence       Int
+  plannedStartAt DateTime?    @db.Timestamptz(3) @map("planned_start_at")
+  plannedEndAt   DateTime?    @db.Timestamptz(3) @map("planned_end_at")
+  startedAt      DateTime?    @db.Timestamptz(3) @map("started_at")
+  completedAt    DateTime?    @db.Timestamptz(3) @map("completed_at")
+  // Logical archival, separate from lifecycle status; permitted only for
+  // terminal records (DEC-RIC-005 §12). No hard delete is exposed.
+  archivedAt     DateTime?    @db.Timestamptz(3) @map("archived_at")
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  epics   Epic[]
+  tasks   Task[]
+
+  @@unique([projectId, code], map: "sprints_project_code_key")
+  @@unique([projectId, sequence], map: "sprints_project_sequence_key")
+  // Referenced by Epic's and Task's composite ownership foreign keys. `id`
+  // is already unique alone, so this adds no new restriction on sprints —
+  // it exists solely to give the child tables a (sprint, project) pair to
+  // point at, which makes "a child's project always equals its sprint's
+  // project" a database-enforced invariant rather than an application
+  // convention.
+  @@unique([id, projectId], map: "sprints_id_project_key")
+  @@index([projectId, status], map: "sprints_project_status_idx")
+  @@map("sprints")
+}
+
+// Project-owned grouping of Tasks inside exactly one Sprint.
+//
+// Optional Jira fields are provenance only: `externalKey` is mutable display
+// metadata and is never the database identity, and no code in this
+// repository calls a Jira API on behalf of this model. Synchronization is
+// owned by P1-033/P1-034 (DEC-RIC-005 §4).
+model Epic {
+  id               String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId        String                   @map("project_id") @db.Uuid
+  sprintId         String                   @map("sprint_id") @db.Uuid
+  code             String
+  title            String
+  description      String?
+  status           EpicStatus               @default(PLANNED)
+  sequence         Int
+  externalProvider BacklogExternalProvider? @map("external_provider")
+  externalId       String?                  @map("external_id")
+  externalKey      String?                  @map("external_key")
+  externalUrl      String?                  @map("external_url")
+  lastSyncedAt     DateTime?                @db.Timestamptz(3) @map("last_synced_at")
+  startedAt        DateTime?                @db.Timestamptz(3) @map("started_at")
+  completedAt      DateTime?                @db.Timestamptz(3) @map("completed_at")
+  archivedAt       DateTime?                @db.Timestamptz(3) @map("archived_at")
+  createdAt        DateTime                 @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  // Composite, not `sprintId` alone: PostgreSQL rejects an Epic claiming a
+  // Sprint that belongs to a different Project, so cross-project contamination
+  // is structurally impossible rather than merely checked in application code.
+  sprint  Sprint  @relation(fields: [sprintId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  tasks   Task[]
+
+  @@unique([projectId, code], map: "epics_project_code_key")
+  @@unique([sprintId, sequence], map: "epics_sprint_sequence_key")
+  // Duplicate-safe external provenance when present. Postgres treats
+  // multiple NULLs in a unique index as non-conflicting, so Epics without
+  // Jira provenance never collide with each other.
+  @@unique([projectId, externalProvider, externalId], map: "epics_project_external_key")
+  // Target of Task's three-column ownership foreign key below — the pair
+  // that makes "a Task's Epic is in the same Project AND the same Sprint"
+  // database-enforced.
+  @@unique([id, projectId, sprintId], map: "epics_id_project_sprint_key")
+  @@index([projectId, status], map: "epics_project_status_idx")
+  @@index([sprintId], map: "epics_sprint_idx")
+  @@map("epics")
+}
+
+// The executable unit of the operational backlog. A Task always belongs to a
+// Sprint and may optionally belong to an Epic within that same Sprint.
+//
+// `acceptanceCriteriaJson` is a deterministic ordered JSON array of non-empty
+// strings (DEC-RIC-005 §9); arbitrary object schemas are deferred. An empty
+// array is a legitimate non-ready planning record — NDERCC-17 does not claim
+// such a Task is executable, because eligibility is not computed here at all.
+model Task {
+  id                     String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId              String                   @map("project_id") @db.Uuid
+  sprintId               String                   @map("sprint_id") @db.Uuid
+  epicId                 String?                  @map("epic_id") @db.Uuid
+  code                   String
+  type                   TaskType
+  title                  String
+  description            String?
+  status                 TaskStatus               @default(TODO)
+  priority               TaskPriority
+  sequence               Int
+  acceptanceCriteriaJson Json                     @default("[]") @map("acceptance_criteria_json")
+  externalProvider       BacklogExternalProvider? @map("external_provider")
+  externalId             String?                  @map("external_id")
+  externalKey            String?                  @map("external_key")
+  externalUrl            String?                  @map("external_url")
+  lastSyncedAt           DateTime?                @db.Timestamptz(3) @map("last_synced_at")
+  startedAt              DateTime?                @db.Timestamptz(3) @map("started_at")
+  completedAt            DateTime?                @db.Timestamptz(3) @map("completed_at")
+  archivedAt             DateTime?                @db.Timestamptz(3) @map("archived_at")
+  createdAt              DateTime                 @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt              DateTime                 @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sprint  Sprint  @relation(fields: [sprintId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  // Three columns, not one. Because `epicId` is nullable and PostgreSQL
+  // foreign keys default to MATCH SIMPLE, the constraint is simply not
+  // checked when `epicId` is NULL — which is exactly the wanted behaviour
+  // for an optional Epic — while a Task that DOES name an Epic is forced to
+  // agree with that Epic on both Project and Sprint.
+  epic    Epic?   @relation(fields: [epicId, projectId, sprintId], references: [id, projectId, sprintId], onDelete: Restrict, onUpdate: Cascade)
+
+  dependencies TaskDependency[] @relation("TaskDependsOnEdges")
+  dependents   TaskDependency[] @relation("TaskPrerequisiteEdges")
+
+  @@unique([projectId, code], map: "tasks_project_code_key")
+  @@unique([sprintId, sequence], map: "tasks_sprint_sequence_key")
+  @@unique([projectId, externalProvider, externalId], map: "tasks_project_external_key")
+  // Target of both TaskDependency edges, making same-project dependencies a
+  // database guarantee.
+  @@unique([id, projectId], map: "tasks_id_project_key")
+  @@index([projectId, status], map: "tasks_project_status_idx")
+  // Covers the deterministic planning-order listing (sprint -> status ->
+  // priority -> sequence) that P0-031 will later read.
+  @@index([sprintId, status, priority, sequence], map: "tasks_sprint_status_priority_sequence_idx")
+  @@index([epicId], map: "tasks_epic_idx")
+  @@map("tasks")
+}
+
+// A directed prerequisite edge: `taskId` requires `dependsOnTaskId`.
+//
+// Direction is explicit and is never inferred or auto-reversed. For later
+// resolver semantics only a prerequisite in DONE satisfies the edge —
+// CANCELLED, TODO, IN_PROGRESS and IN_REVIEW do not (DEC-RIC-005 §10).
+// NDERCC-17 stores and validates that contract; it does not compute
+// eligibility.
+//
+// Three separate protections, each at the lowest layer that can express it:
+//   - same-project: both composite foreign keys below resolve through
+//     (task id, project id), so an edge spanning two Projects cannot be
+//     inserted at all;
+//   - no duplicate edge: UNIQUE (task_id, depends_on_task_id);
+//   - no self-dependency: CHECK `task_dependencies_no_self_check`
+//     (task_id <> depends_on_task_id). Like `operators_singleton_check`,
+//     this CHECK has no Prisma schema representation and lives only in
+//     prisma/migrations/20260813120000_operational_backlog_model/migration.sql.
+//     A future `prisma migrate dev` run touching this table must not let
+//     Prisma's schema-diff drop it as unrepresented drift — review the
+//     generated SQL before applying.
+//
+// Cycles are the one rule a relational constraint cannot express, so they
+// are rejected transactionally in src/task-dependency.ts under the same
+// project row lock that serializes every other backlog mutation.
+model TaskDependency {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId       String   @map("project_id") @db.Uuid
+  taskId          String   @map("task_id") @db.Uuid
+  dependsOnTaskId String   @map("depends_on_task_id") @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+
+  project       Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  task          Task    @relation("TaskDependsOnEdges", fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  dependsOnTask Task    @relation("TaskPrerequisiteEdges", fields: [dependsOnTaskId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([taskId, dependsOnTaskId], map: "task_dependencies_pair_key")
+  @@index([projectId], map: "task_dependencies_project_idx")
+  @@index([taskId], map: "task_dependencies_task_idx")
+  // Reverse lookup: "which Tasks are waiting on this one?"
+  @@index([dependsOnTaskId], map: "task_dependencies_depends_on_idx")
+  @@map("task_dependencies")
 }
 
 // The installation's single primary operator. `singleton` is always `true`.
