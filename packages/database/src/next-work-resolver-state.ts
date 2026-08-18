@@ -75,21 +75,27 @@ interface SnapshotPointer {
   readonly checksum: string
 }
 
-function newestSnapshotsBySource(rows: readonly Readonly<{
-  id: string
-  documentSourceId: string
-  providerVersion: string
-  checksum: string
-}>[]): ReadonlyMap<string, SnapshotPointer> {
+async function loadLatestSnapshotsBySource(
+  client: PrismaClient,
+  projectId: string,
+  sourceIds: readonly string[],
+): Promise<ReadonlyMap<string, SnapshotPointer>> {
+  const rows = await Promise.all(sourceIds.map(async (documentSourceId) => {
+    const snapshot = await client.documentSnapshot.findFirst({
+      where: { projectId, documentSourceId },
+      select: {
+        id: true,
+        providerVersion: true,
+        checksum: true,
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    return snapshot ? { documentSourceId, snapshot } : null
+  }))
+
   const pointers = new Map<string, SnapshotPointer>()
   for (const row of rows) {
-    if (!pointers.has(row.documentSourceId)) {
-      pointers.set(row.documentSourceId, {
-        id: row.id,
-        providerVersion: row.providerVersion,
-        checksum: row.checksum,
-      })
-    }
+    if (row) pointers.set(row.documentSourceId, row.snapshot)
   }
   return pointers
 }
@@ -159,7 +165,7 @@ export async function composeNextWorkResolverState(
   const requirementIds = referencedIds(input.strategicContexts, 'requirementIds')
   const decisionIds = referencedIds(input.strategicContexts, 'decisionIds')
   const sourceIds = referencedIds(input.strategicContexts, 'sourceIds')
-  const [sprints, epics, tasks, dependencies, requirements, decisions, sources, snapshots] = await Promise.all([
+  const [sprints, epics, tasks, dependencies, requirements, decisions, sources, snapshotsBySource] = await Promise.all([
     client.sprint.findMany({ where: { projectId: input.projectId } }),
     client.epic.findMany({ where: { projectId: input.projectId } }),
     client.task.findMany({ where: { projectId: input.projectId } }),
@@ -167,19 +173,8 @@ export async function composeNextWorkResolverState(
     client.requirement.findMany({ where: { projectId: input.projectId, id: { in: requirementIds } } }),
     client.decision.findMany({ where: { projectId: input.projectId, id: { in: decisionIds } } }),
     client.documentSource.findMany({ where: { projectId: input.projectId, id: { in: sourceIds } } }),
-    client.documentSnapshot.findMany({
-      where: { projectId: input.projectId, documentSourceId: { in: sourceIds } },
-      select: {
-        id: true,
-        documentSourceId: true,
-        providerVersion: true,
-        checksum: true,
-      },
-      distinct: ['documentSourceId'],
-      orderBy: [{ documentSourceId: 'asc' }, { createdAt: 'desc' }, { id: 'desc' }],
-    }),
+    loadLatestSnapshotsBySource(client, input.projectId, sourceIds),
   ])
-  const pointers = newestSnapshotsBySource(snapshots)
   return {
     projectId: input.projectId,
     resolverVersion: NEXT_WORK_RESOLVER_VERSION,
@@ -190,7 +185,7 @@ export async function composeNextWorkResolverState(
     dependencies: mapDependencies(dependencies),
     requirements: mapRequirements(requirements),
     decisions: mapDecisions(decisions),
-    strategicSources: mapSources(sources, pointers),
+    strategicSources: mapSources(sources, snapshotsBySource),
     strategicContexts: input.strategicContexts,
   }
 }
