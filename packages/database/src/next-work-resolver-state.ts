@@ -169,6 +169,13 @@ export async function composeNextWorkResolverState(
     client.documentSource.findMany({ where: { projectId: input.projectId, id: { in: sourceIds } } }),
     client.documentSnapshot.findMany({
       where: { projectId: input.projectId, documentSourceId: { in: sourceIds } },
+      select: {
+        id: true,
+        documentSourceId: true,
+        providerVersion: true,
+        checksum: true,
+      },
+      distinct: ['documentSourceId'],
       orderBy: [{ documentSourceId: 'asc' }, { createdAt: 'desc' }, { id: 'desc' }],
     }),
   ])
