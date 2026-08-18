@@ -61,3 +61,25 @@ export type {
   ExternalIdentityInput,
   LifecycleTimestampEffect,
 } from './operational-backlog.js'
+
+export {
+  NEXT_WORK_RESOLVER_VERSION,
+  NoEligibleWorkReason,
+  resolveNextWork,
+} from './next-work-resolver.js'
+export type {
+  CandidateStrategicContextInput,
+  NextWorkRankingTuple,
+  NextWorkResolverInput,
+  NextWorkResolverResult,
+  NoEligibleWorkResult,
+  NoEligibleWorkReason as NoEligibleWorkReasonType,
+  ResolverDecisionInput,
+  ResolverDependencyInput,
+  ResolverEpicInput,
+  ResolverRequirementInput,
+  ResolverSprintInput,
+  ResolverStrategicSourceInput,
+  ResolverTaskInput,
+  SelectedNextWorkResult,
+} from './next-work-resolver.js'

@@ -213,6 +213,12 @@ export {
   removeTaskDependency,
 } from './task-dependency.js'
 
+export type { PersistedNextWorkResolverInput } from './next-work-resolver-state.js'
+export {
+  composeNextWorkResolverState,
+  resolveNextWorkFromPersistedState,
+} from './next-work-resolver-state.js'
+
 export {
   parseStrategicTruth,
   DecisionStatus,
