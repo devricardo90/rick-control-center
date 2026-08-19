@@ -160,6 +160,10 @@ describe('persisted next-work resolver composition', () => {
         syncStatus: 'SYNCED',
       }],
     })
+    const projectedDecision = state.decisions.find(decision => decision.id === truth.decisionId)
+    expect(projectedDecision?.code).toEqual(expect.any(String))
+    expect(projectedDecision?.chosenDecision).toBe('Use deterministic selection')
+    expect(projectedDecision?.supersedesDecisionId).toBeNull()
     await expect(resolveNextWorkFromPersistedState(client, {
       projectId: backlog.projectId,
       strategicContexts: [contextFor(backlog.taskId, truth)],

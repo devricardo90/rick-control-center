@@ -56,6 +56,9 @@ function mapRequirements(rows: readonly Readonly<{
 function mapDecisions(rows: readonly Readonly<{
   id: string
   projectId: string
+  code: string
+  chosenDecision: string
+  supersedesDecisionId: string | null
   status: string
   documentSourceId: string
   sourceSnapshotId: string
@@ -63,6 +66,9 @@ function mapDecisions(rows: readonly Readonly<{
   return rows.map(row => ({
     id: row.id,
     projectId: row.projectId,
+    code: row.code,
+    chosenDecision: row.chosenDecision,
+    supersedesDecisionId: row.supersedesDecisionId,
     status: row.status,
     documentSourceId: row.documentSourceId,
     sourceSnapshotId: row.sourceSnapshotId,
