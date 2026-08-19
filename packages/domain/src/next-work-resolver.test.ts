@@ -299,16 +299,46 @@ describe('exact deterministic ranking', () => {
     expect(selectedTaskId(competingInput({ code: 'AAA', sequence: 1 }))).toBe('task-a')
   })
 
-  it('reports duplicate deterministic identity instead of breaking an ambiguous tie', () => {
-    const tied = competingInput({ id: 'a-task', code: 'TASK-AA', sequence: 0 })
+  it('keeps selecting when Task.sequence ties and later ranking fields differ', () => {
+    const tied = competingInput({ priority: 'P0', sequence: 0, code: 'TASK-Z' })
     expect(resolveNextWork(tied)).toMatchObject({
-      kind: 'NO_ELIGIBLE_WORK',
-      diagnostics: [{ code: 'AMBIGUOUS_CANDIDATE_ORDERING', evidenceKey: 'DUPLICATE_TASK_SEQUENCE' }],
+      kind: 'SELECTED',
+      task: { id: 'task-b' },
+      diagnostics: [expect.objectContaining({ evidenceKey: 'DUPLICATE_TASK_SEQUENCE' })],
+    })
+  })
+
+  it('uses Task.id as the final tie-break when Task.code also ties', () => {
+    const tied = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
+    const result = resolveNextWork(tied)
+    expect(result.kind).toBe('SELECTED')
+    if (result.kind !== 'SELECTED') return
+    expect(result.task.id).toBe('a-task')
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_CODE')).toBe(true)
+  })
+
+  it('does not globally suppress candidates when Sprint.sequence ties', () => {
+    const withSprintTie: NextWorkResolverInput = {
+      ...baseInput(),
+      sprints: [...baseInput().sprints, {
+        id: 'sprint-b', projectId: 'project-a', code: 'SPR-B', sequence: 0,
+        status: 'ACTIVE', archivedAt: null,
+      }],
+    }
+    const input = addTask(withSprintTie, {
+      id: 'task-b', projectId: 'project-a', sprintId: 'sprint-b', epicId: null,
+      code: 'TASK-B', priority: 'P0', sequence: 0, status: 'TODO',
+      acceptanceCriteria: ['done'], archivedAt: null,
+    })
+    expect(resolveNextWork(input)).toMatchObject({
+      kind: 'SELECTED',
+      task: { id: 'task-b' },
+      diagnostics: [expect.objectContaining({ evidenceKey: 'DUPLICATE_SPRINT_SEQUENCE' })],
     })
   })
 
   it('is independent of collection order and timestamps', () => {
-    const input = competingInput({ id: 'a-task', code: 'TASK-AA', sequence: 0 })
+    const input = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
     const decoratedTasks = input.tasks.map(task => ({
       ...task,
       createdAt: task.id === 'task-a' ? new Date(0) : new Date(999_999),
@@ -321,10 +351,11 @@ describe('exact deterministic ranking', () => {
       strategicContexts: [...input.strategicContexts].reverse(),
     })
     expect(second).toEqual(first)
-    expect(resolveNextWork({ ...input, tasks: decoratedTasks })).toMatchObject({
-      kind: 'NO_ELIGIBLE_WORK',
-      diagnostics: [{ code: 'AMBIGUOUS_CANDIDATE_ORDERING', evidenceKey: 'DUPLICATE_TASK_SEQUENCE' }],
-    })
+    const result = resolveNextWork({ ...input, tasks: decoratedTasks })
+    expect(result.kind).toBe('SELECTED')
+    if (result.kind !== 'SELECTED') return
+    expect(result.task.id).toBe('a-task')
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_CODE')).toBe(true)
   })
 })
 
