@@ -729,13 +729,6 @@ export function isReadinessDiagnosticBlockingTask(
   diagnostic: ReadinessDiagnostic,
 ): boolean {
   if (diagnostic.severity !== 'ERROR') return false
-  // DEC-RIC-006 is a total ranking. Equal Sprint.sequence, Task.sequence or
-  // Task.code values are legal partial ties resolved by later tuple fields;
-  // they remain visible diagnostics but must not override selection.
-  if (diagnostic.code === 'AMBIGUOUS_CANDIDATE_ORDERING'
-    && (diagnostic.evidenceKey === 'DUPLICATE_SPRINT_SEQUENCE'
-      || diagnostic.evidenceKey === 'DUPLICATE_TASK_SEQUENCE'
-      || diagnostic.evidenceKey === 'DUPLICATE_TASK_CODE')) return false
   if (diagnostic.subject.kind === 'PROJECT') return true
   if (!isIdentifier(task.id) || !sameProject(task.projectId, input.projectId)) return false
   const subjects = [diagnostic.subject, ...diagnostic.relatedSubjects]

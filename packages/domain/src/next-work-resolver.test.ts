@@ -299,25 +299,29 @@ describe('exact deterministic ranking', () => {
     expect(selectedTaskId(competingInput({ code: 'AAA', sequence: 1 }))).toBe('task-a')
   })
 
-  it('keeps selecting when Task.sequence ties and later ranking fields differ', () => {
+  it('blocks duplicate Task.sequence as an invalid structural state', () => {
     const tied = competingInput({ priority: 'P0', sequence: 0, code: 'TASK-Z' })
-    expect(resolveNextWork(tied)).toMatchObject({
-      kind: 'SELECTED',
-      task: { id: 'task-b' },
-      diagnostics: [expect.objectContaining({ evidenceKey: 'DUPLICATE_TASK_SEQUENCE' })],
-    })
-  })
-
-  it('uses Task.id as the final tie-break when Task.code also ties', () => {
-    const tied = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
     const result = resolveNextWork(tied)
-    expect(result.kind).toBe('SELECTED')
-    if (result.kind !== 'SELECTED') return
-    expect(result.task.id).toBe('a-task')
-    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_CODE')).toBe(true)
+    expect(result.kind).toBe('NO_ELIGIBLE_WORK')
+    expect(result.diagnostics.some(item => (
+      item.code === 'AMBIGUOUS_CANDIDATE_ORDERING'
+      && item.evidenceKey === 'DUPLICATE_TASK_SEQUENCE'
+      && item.severity === 'ERROR'
+    ))).toBe(true)
   })
 
-  it('does not globally suppress candidates when Sprint.sequence ties', () => {
+  it('blocks duplicate Task.code as an invalid structural state', () => {
+    const tied = competingInput({ code: 'TASK-A', sequence: 1 })
+    const result = resolveNextWork(tied)
+    expect(result.kind).toBe('NO_ELIGIBLE_WORK')
+    expect(result.diagnostics.some(item => (
+      item.code === 'AMBIGUOUS_CANDIDATE_ORDERING'
+      && item.evidenceKey === 'DUPLICATE_TASK_CODE'
+      && item.severity === 'ERROR'
+    ))).toBe(true)
+  })
+
+  it('blocks duplicate Sprint.sequence as an invalid structural state', () => {
     const withSprintTie: NextWorkResolverInput = {
       ...baseInput(),
       sprints: [...baseInput().sprints, {
@@ -330,15 +334,31 @@ describe('exact deterministic ranking', () => {
       code: 'TASK-B', priority: 'P0', sequence: 0, status: 'TODO',
       acceptanceCriteria: ['done'], archivedAt: null,
     })
-    expect(resolveNextWork(input)).toMatchObject({
-      kind: 'SELECTED',
-      task: { id: 'task-b' },
-      diagnostics: [expect.objectContaining({ evidenceKey: 'DUPLICATE_SPRINT_SEQUENCE' })],
+    const result = resolveNextWork(input)
+    expect(result.kind).toBe('NO_ELIGIBLE_WORK')
+    expect(result.diagnostics.some(item => (
+      item.code === 'AMBIGUOUS_CANDIDATE_ORDERING'
+      && item.evidenceKey === 'DUPLICATE_SPRINT_SEQUENCE'
+      && item.severity === 'ERROR'
+    ))).toBe(true)
+  })
+
+  it('does not contaminate an unrelated valid candidate', () => {
+    const duplicate = competingInput({ sequence: 0, code: 'TASK-Z' })
+    const input = addTask(duplicate, {
+      id: 'task-c', projectId: 'project-a', sprintId: 'sprint-a', epicId: null,
+      code: 'TASK-C', priority: 'P3', sequence: 2, status: 'TODO',
+      acceptanceCriteria: ['done'], archivedAt: null,
     })
+    const result = resolveNextWork(input)
+    expect(result.kind).toBe('SELECTED')
+    if (result.kind !== 'SELECTED') return
+    expect(result.task.id).toBe('task-c')
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_SEQUENCE')).toBe(true)
   })
 
   it('is independent of collection order and timestamps', () => {
-    const input = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
+    const input = competingInput({ priority: 'P0', sequence: 1, code: 'TASK-B' })
     const decoratedTasks = input.tasks.map(task => ({
       ...task,
       createdAt: task.id === 'task-a' ? new Date(0) : new Date(999_999),
@@ -354,12 +374,41 @@ describe('exact deterministic ranking', () => {
     const result = resolveNextWork({ ...input, tasks: decoratedTasks })
     expect(result.kind).toBe('SELECTED')
     if (result.kind !== 'SELECTED') return
-    expect(result.task.id).toBe('a-task')
-    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_CODE')).toBe(true)
+    expect(result.task.id).toBe('task-b')
+    expect(result.diagnostics).toEqual([])
   })
 })
 
 describe('candidate-scoped strategic safety', () => {
+  it('fails closed for duplicate identity and conflicting parentage', () => {
+    const base = baseInput()
+    const result = resolveNextWork({
+      ...base,
+      sprints: [...base.sprints, {
+        id: 'sprint-b', projectId: 'project-a', code: 'SPR-B', sequence: 1,
+        status: 'ACTIVE', archivedAt: null,
+      }],
+      tasks: [...base.tasks, {
+        ...base.tasks[0], sprintId: 'sprint-b',
+      }],
+    })
+    expect(result.kind).toBe('NO_ELIGIBLE_WORK')
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_ID')).toBe(true)
+    expect(result.diagnostics.some(item => item.evidenceKey === 'CONFLICTING_PARENTAGE')).toBe(true)
+  })
+
+  it('fails closed for multiple strategic contexts', () => {
+    const base = baseInput()
+    const context = base.strategicContexts[0]
+    if (!context) throw new Error('fixture requires a context')
+    const result = resolveNextWork({
+      ...base,
+      strategicContexts: [...base.strategicContexts, { ...context }],
+    })
+    expect(result.kind).toBe('NO_ELIGIBLE_WORK')
+    expect(result.diagnostics.some(item => item.evidenceKey === 'MULTIPLE_STRATEGIC_CONTEXTS')).toBe(true)
+  })
+
   it('returns sanitized evidence for safe applicable truth', () => {
     const result = resolveNextWork(safeStrategicInput())
     expect(result).toMatchObject({
