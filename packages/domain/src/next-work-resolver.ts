@@ -11,6 +11,12 @@ import {
   validateSequence,
 } from './operational-backlog.js'
 import type { TaskPriority, TaskStatus } from './operational-backlog.js'
+import {
+  diagnoseReadiness,
+  isReadinessDiagnosticBlockingTask,
+  READINESS_DIAGNOSTICS_VERSION,
+} from './readiness-diagnostics.js'
+import type { ReadinessDiagnostic } from './readiness-diagnostics.js'
 
 export const NEXT_WORK_RESOLVER_VERSION = 'P0_031_V1' as const
 
@@ -71,7 +77,11 @@ export interface ResolverRequirementInput {
   readonly sourceSnapshotId?: unknown
 }
 
-export type ResolverDecisionInput = ResolverRequirementInput
+export interface ResolverDecisionInput extends ResolverRequirementInput {
+  readonly code?: unknown
+  readonly chosenDecision?: unknown
+  readonly supersedesDecisionId?: unknown
+}
 
 export interface ResolverStrategicSourceInput {
   readonly id?: unknown
@@ -113,6 +123,8 @@ export interface SelectedNextWorkResult {
   readonly kind: 'SELECTED'
   readonly projectId: string
   readonly resolverVersion: typeof NEXT_WORK_RESOLVER_VERSION
+  readonly diagnosticsVersion: typeof READINESS_DIAGNOSTICS_VERSION
+  readonly diagnostics: readonly ReadinessDiagnostic[]
   readonly task: Readonly<{ id: string, code: string, priority: TaskPriority, sequence: number }>
   readonly sprint: Readonly<{ id: string, code: string, sequence: number }>
   readonly epic: Readonly<{ id: string, code: string }> | null
@@ -140,6 +152,8 @@ export interface NoEligibleWorkResult {
   readonly kind: 'NO_ELIGIBLE_WORK'
   readonly projectId: string
   readonly resolverVersion: typeof NEXT_WORK_RESOLVER_VERSION
+  readonly diagnosticsVersion: typeof READINESS_DIAGNOSTICS_VERSION
+  readonly diagnostics: readonly ReadinessDiagnostic[]
   readonly reasons: readonly NoEligibleWorkReason[]
   readonly evidence: Readonly<{
     evaluatedTaskCount: number
@@ -433,7 +447,10 @@ function compareRanking(left: NextWorkRankingTuple, right: NextWorkRankingTuple)
   return 0
 }
 
-function evaluateCandidates(input: NextWorkResolverInput): EvaluationSummary {
+function evaluateCandidates(
+  input: NextWorkResolverInput,
+  diagnostics: readonly ReadinessDiagnostic[],
+): EvaluationSummary {
   const eligible: Array<{ task: ValidTask, strategicContext: StrategicEvidence }> = []
   const consideredTaskIds: string[] = []
   const strategicTruthUnsafeTaskIds: string[] = []
@@ -453,8 +470,15 @@ function evaluateCandidates(input: NextWorkResolverInput): EvaluationSummary {
       continue
     }
     const strategicContext = evaluateStrategicContext(input, operational.task.id)
-    if (strategicContext) eligible.push({ task: operational.task, strategicContext })
-    else strategicTruthUnsafeTaskIds.push(operational.task.id)
+    if (!strategicContext) {
+      strategicTruthUnsafeTaskIds.push(operational.task.id)
+      continue
+    }
+    if (diagnostics.some(diagnostic => isReadinessDiagnosticBlockingTask(input, task, diagnostic))) {
+      invalidCandidateCount += 1
+      continue
+    }
+    eligible.push({ task: operational.task, strategicContext })
   }
   return {
     eligible,
@@ -469,11 +493,14 @@ function noEligibleResult(
   input: NextWorkResolverInput,
   reasons: readonly NoEligibleWorkReason[],
   summary: EvaluationSummary,
+  diagnostics: readonly ReadinessDiagnostic[],
 ): NoEligibleWorkResult {
   return {
     kind: 'NO_ELIGIBLE_WORK',
     projectId: input.projectId,
     resolverVersion: NEXT_WORK_RESOLVER_VERSION,
+    diagnosticsVersion: READINESS_DIAGNOSTICS_VERSION,
+    diagnostics,
     reasons,
     evidence: {
       evaluatedTaskCount: summary.consideredTaskIds.length,
@@ -487,15 +514,16 @@ function noEligibleResult(
 }
 
 export function resolveNextWork(input: NextWorkResolverInput): NextWorkResolverResult {
-  if (!isIdentifier(input.projectId) || input.project.id !== input.projectId
-    || input.project.status !== 'ACTIVE') {
+  const diagnostics = diagnoseReadiness(input)
+  if (!isIdentifier(input.projectId) || input.project?.id !== input.projectId
+    || input.project?.status !== 'ACTIVE') {
     return noEligibleResult(input, [NoEligibleWorkReason.PROJECT_NOT_ACTIVE], {
       eligible: [],
       consideredTaskIds: [],
       strategicTruthUnsafeTaskIds: [],
       invalidCandidateCount: 0,
       operationallyIneligibleCount: 0,
-    })
+    }, diagnostics)
   }
   if (input.resolverVersion !== NEXT_WORK_RESOLVER_VERSION) {
     return noEligibleResult(input, [NoEligibleWorkReason.NO_ELIGIBLE_WORK], {
@@ -504,9 +532,9 @@ export function resolveNextWork(input: NextWorkResolverInput): NextWorkResolverR
       strategicTruthUnsafeTaskIds: [],
       invalidCandidateCount: input.tasks.filter(task => task.projectId === input.projectId).length,
       operationallyIneligibleCount: 0,
-    })
+    }, diagnostics)
   }
-  const summary = evaluateCandidates(input)
+  const summary = evaluateCandidates(input, diagnostics)
   const selected = [...summary.eligible].sort((left, right) => (
     compareRanking(left.task.ranking, right.task.ranking)
   ))[0]
@@ -516,12 +544,14 @@ export function resolveNextWork(input: NextWorkResolverInput): NextWorkResolverR
       reasons.push(NoEligibleWorkReason.STRATEGIC_TRUTH_UNSAFE)
     }
     reasons.push(NoEligibleWorkReason.NO_ELIGIBLE_WORK)
-    return noEligibleResult(input, reasons, summary)
+    return noEligibleResult(input, reasons, summary, diagnostics)
   }
   return {
     kind: 'SELECTED',
     projectId: input.projectId,
     resolverVersion: NEXT_WORK_RESOLVER_VERSION,
+    diagnosticsVersion: READINESS_DIAGNOSTICS_VERSION,
+    diagnostics,
     task: {
       id: selected.task.id,
       code: selected.task.code,

@@ -83,3 +83,35 @@ export type {
   ResolverTaskInput,
   SelectedNextWorkResult,
 } from './next-work-resolver.js'
+
+export {
+  diagnoseReadiness,
+  isReadinessDiagnosticBlockingTask,
+  ReadinessDiagnosticCode,
+  ReadinessDiagnosticSeverity,
+  READINESS_DIAGNOSTICS_VERSION,
+} from './readiness-diagnostics.js'
+export type {
+  AmbiguousCandidateOrderingDiagnostic,
+  AmbiguousCandidateOrderingEvidence,
+  AmbiguousCandidateOrderingEvidenceKey,
+  BlockedDependencyDiagnostic,
+  BlockedDependencyEvidence,
+  InvalidProjectEvidence,
+  InvalidProjectStateDiagnostic,
+  InvalidProjectEvidenceKey,
+  MissingRequiredInputDiagnostic,
+  MissingRequiredInputEvidence,
+  MissingRequiredInputEvidenceKey,
+  ReadinessDiagnostic,
+  ReadinessDiagnosticCode as ReadinessDiagnosticCodeType,
+  ReadinessDiagnosticSeverity as ReadinessDiagnosticSeverityType,
+  ReadinessSubject,
+  ReadinessSubjectKind,
+  StaleOrUnapprovedTruthDiagnostic,
+  StaleOrUnapprovedTruthEvidence,
+  StaleOrUnapprovedTruthEvidenceKey,
+  StrategicConflictDiagnostic,
+  StrategicConflictEvidence,
+  StrategicConflictEvidenceKey,
+} from './readiness-diagnostics.js'

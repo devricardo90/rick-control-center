@@ -1,3 +1,4 @@
+/* eslint-disable max-lines-per-function -- existing exhaustive resolver fixture. */
 import { describe, expect, it } from 'vitest'
 import {
   NEXT_WORK_RESOLVER_VERSION,
@@ -99,6 +100,8 @@ describe('resolver identity and result contract', () => {
       kind: 'SELECTED',
       projectId: 'project-a',
       resolverVersion: 'P0_031_V1',
+      diagnosticsVersion: 'P0_032_V1',
+      diagnostics: [],
       task: { id: 'task-a', code: 'TASK-A', priority: 'P1', sequence: 0 },
       sprint: { id: 'sprint-a', code: 'SPR-A', sequence: 0 },
       epic: null,
@@ -296,14 +299,16 @@ describe('exact deterministic ranking', () => {
     expect(selectedTaskId(competingInput({ code: 'AAA', sequence: 1 }))).toBe('task-a')
   })
 
-  it('uses canonical Task.code then Task.id as final tie-breaks', () => {
-    expect(selectedTaskId(competingInput({ code: 'AAA', sequence: 0 }))).toBe('task-b')
-    const tied = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
-    expect(selectedTaskId(tied)).toBe('a-task')
+  it('reports duplicate deterministic identity instead of breaking an ambiguous tie', () => {
+    const tied = competingInput({ id: 'a-task', code: 'TASK-AA', sequence: 0 })
+    expect(resolveNextWork(tied)).toMatchObject({
+      kind: 'NO_ELIGIBLE_WORK',
+      diagnostics: [{ code: 'AMBIGUOUS_CANDIDATE_ORDERING', evidenceKey: 'DUPLICATE_TASK_SEQUENCE' }],
+    })
   })
 
   it('is independent of collection order and timestamps', () => {
-    const input = competingInput({ id: 'a-task', code: 'TASK-A', sequence: 0 })
+    const input = competingInput({ id: 'a-task', code: 'TASK-AA', sequence: 0 })
     const decoratedTasks = input.tasks.map(task => ({
       ...task,
       createdAt: task.id === 'task-a' ? new Date(0) : new Date(999_999),
@@ -316,7 +321,10 @@ describe('exact deterministic ranking', () => {
       strategicContexts: [...input.strategicContexts].reverse(),
     })
     expect(second).toEqual(first)
-    expect(selectedTaskId({ ...input, tasks: decoratedTasks })).toBe('a-task')
+    expect(resolveNextWork({ ...input, tasks: decoratedTasks })).toMatchObject({
+      kind: 'NO_ELIGIBLE_WORK',
+      diagnostics: [{ code: 'AMBIGUOUS_CANDIDATE_ORDERING', evidenceKey: 'DUPLICATE_TASK_SEQUENCE' }],
+    })
   })
 })
 
