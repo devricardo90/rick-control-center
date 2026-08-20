@@ -19,7 +19,7 @@ services:
       POSTGRES_PASSWORD: rick
       POSTGRES_DB: rick_dev
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5455:5432"
     volumes:
       - rick_postgres_data:/var/lib/postgresql/data
     healthcheck:

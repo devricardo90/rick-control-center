@@ -17,7 +17,7 @@ NDERCC-5 / RIC-S0-04 (initial domain and persistence model).
    docker compose up -d
    ```
 
-   This starts `postgres:16-alpine` on `localhost:5432` with the credentials
+   This starts `postgres:16-alpine` on `localhost:5455` with the credentials
    defined in `docker-compose.yml` (local-only, non-secret).
 
 2. Copy the environment example and adjust if needed:
@@ -27,6 +27,9 @@ NDERCC-5 / RIC-S0-04 (initial domain and persistence model).
    ```
 
    The default `DATABASE_URL` already matches the Docker Compose service.
+   Existing checkouts must update any ignored `.env` value using
+   `localhost:5432/rick_dev` to `localhost:5455/rick_dev` before running
+   database commands; pulling `.env.example` does not update `.env`.
 
 3. Generate the Prisma client:
 
@@ -219,7 +222,10 @@ instead on vitest's default sequential execution within a single file.
 
 - Prisma 7 reads the connection string from `prisma.config.ts`
   (`datasource.url`), not from `schema.prisma`. `schema.prisma` only declares
-  the `postgresql` provider and models.
+  the `postgresql` provider and models. The config loads `DATABASE_URL` from
+  the repository-root `.env` by an explicit file-relative path, so workspace
+  cwd changes do not affect local commands. A `DATABASE_URL` already supplied
+  by the process environment takes precedence for CI and disposable databases.
 - `PrismaClient` is constructed with the `@prisma/adapter-pg` driver adapter
   (`src/client.ts`), which Prisma 7 requires for all databases.
 - Credentials are never logged: query logging (`log: ['query', ...]`) is
