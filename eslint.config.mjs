@@ -7,7 +7,13 @@ export default createConfigForNuxt({
 })
   .prepend({
     name: 'rick/ignores',
-    ignores: ['**/dist/**', '**/.nuxt/**', '**/.output/**', '**/node_modules/**'],
+    ignores: [
+      '**/dist/**',
+      '**/.nuxt/**',
+      '**/.output/**',
+      '**/node_modules/**',
+      '**/.worktrees/**',
+    ],
   })
   .append({
     name: 'rick/typescript',

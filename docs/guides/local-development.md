@@ -51,6 +51,21 @@ git-ignored (`.gitignore`) precisely so it is safe to hold local secrets,
 but this project has no real secrets to put there yet: every value in
 `.env.example` is a non-secret local placeholder.
 
+**Existing checkout upgrade:** if your `.env` predates the dedicated RCC
+PostgreSQL port, update it before running Prisma, tests, or the application:
+
+```text
+postgresql://rick:rick@localhost:5432/rick_dev
+```
+
+must become:
+
+```text
+postgresql://rick:rick@localhost:5455/rick_dev
+```
+
+Pulling this repository does not update the ignored `.env` automatically.
+
 ## 4. Start PostgreSQL
 
 ```bash
@@ -58,7 +73,7 @@ docker compose up -d
 ```
 
 This starts `postgres:16-alpine` (container `rick_postgres`) on
-`localhost:5432` with the credentials declared in `docker-compose.yml`
+`localhost:5455` with the credentials declared in `docker-compose.yml`
 (`rick` / `rick`, database `rick_dev` — local-only, non-secret). Verify it
 is healthy before continuing:
 
@@ -284,6 +299,17 @@ be proven against a mock) — Docker Compose must be running and migrations
 applied before you run it, exactly as in CI
 (see [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), which
 provisions its own disposable PostgreSQL service for the same reason).
+Unlike Prisma CLI commands, Vitest does not load `prisma.config.ts`; export
+the root `.env` value into the test process before running it. For example,
+in PowerShell:
+
+```powershell
+$env:DATABASE_URL="postgresql://rick:rick@localhost:5455/rick_dev"
+pnpm test
+Remove-Item Env:DATABASE_URL
+```
+
+CI supplies its disposable `DATABASE_URL` directly in the same way.
 
 ## 12. Resetting the local database
 
@@ -300,7 +326,7 @@ again before logging in.
 
 ## 13. Troubleshooting
 
-**Port `5432` (PostgreSQL) or `3000` (Nuxt) is already in use**
+**Port `5455` (PostgreSQL) or `3000` (Nuxt) is already in use**
 Another process — including a previous `docker compose up -d` you forgot
 was running, or an unrelated local service — is bound to that port. Check
 with `docker compose ps` / your OS's port-listing tool and stop the
@@ -314,10 +340,15 @@ requires a running Docker engine, not just the CLI being installed.
 **`Cannot resolve environment variable: DATABASE_URL`**
 Prisma's config (`packages/database/prisma.config.ts`) reads the
 connection string from `DATABASE_URL` and fails fast if it is unset. Make
-sure you completed step 3 (`.env` exists) and that whatever is running the
-command actually loads it — commands run directly in a shell that never
-sourced `.env` need it set explicitly, e.g.
-`DATABASE_URL="postgresql://rick:rick@localhost:5432/rick_dev" pnpm test`.
+sure you completed step 3 and that the repository-root `.env` contains
+`DATABASE_URL="postgresql://rick:rick@localhost:5455/rick_dev"`.
+If the checkout existed before RCC moved to port `5455`, replace any stale
+`localhost:5432/rick_dev` value in `.env`; Git does not update this ignored
+file, and the old value may connect to an unrelated local PostgreSQL.
+The config loads that file explicitly for Prisma CLI commands regardless
+of the package workspace cwd. An externally set `DATABASE_URL` takes
+precedence, which is how CI and disposable databases override the local
+value.
 
 **Stale Prisma client / types don't match the schema**
 Re-run `pnpm db:generate` after pulling changes that touch

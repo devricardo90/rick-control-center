@@ -28,6 +28,10 @@ pnpm-debug.log*
 *.swp
 *.swo
 
+# Machine-local agent/worktree state
+.claude/settings.local.json
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
