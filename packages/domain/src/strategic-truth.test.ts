@@ -5,6 +5,19 @@ import {
   RequirementType,
 } from './strategic-truth.js'
 
+function parseDecisionWithDate(decidedAt: string) {
+  return parseStrategicTruth({
+    documentSourceId: 'source-a',
+    sourceSnapshotId: 'snapshot-a',
+    contentText: [
+      '## DEC-RIC-031 — Deterministic date',
+      '- Status: APPROVED',
+      '- Decision: Parse dates independently of the host timezone.',
+      `- Decided at: ${decidedAt}`,
+    ].join('\n'),
+  })
+}
+
 it('extracts only explicit requirements, allowed constraints and canonical decisions', () => {
   const candidate = parseStrategicTruth({
     documentSourceId: 'source-a',
@@ -87,4 +100,66 @@ it('keeps synthetic constraint identity stable and changes it when wording chang
   expect(first.requirements[0]?.code).toBe(repeat.requirements[0]?.code)
   expect(first.requirements[0]?.code).not.toBe(changed.requirements[0]?.code)
   expect(first.requirements[0]?.code).toBe('CON-AB693D5AC3499873')
+})
+
+it('canonicalizes a timezone-less decision date as UTC under multiple host timezones', () => {
+  const previousTimezone = process.env.TZ
+  try {
+    const canonicalValues = ['UTC', 'Europe/Berlin', 'America/Los_Angeles'].map((timezone) => {
+      process.env.TZ = timezone
+      const isoCandidate = parseDecisionWithDate('2026-08-20 10:00')
+      const legacyCandidate = parseDecisionWithDate('August 20, 2026 10:00 PM')
+      expect(isoCandidate.valid).toBe(true)
+      expect(legacyCandidate.valid).toBe(true)
+      return [
+        isoCandidate.decisions[0]?.decidedAt?.toISOString(),
+        legacyCandidate.decisions[0]?.decidedAt?.toISOString(),
+      ]
+    })
+    expect(canonicalValues).toEqual([
+      ['2026-08-20T10:00:00.000Z', '2026-08-20T22:00:00.000Z'],
+      ['2026-08-20T10:00:00.000Z', '2026-08-20T22:00:00.000Z'],
+      ['2026-08-20T10:00:00.000Z', '2026-08-20T22:00:00.000Z'],
+    ])
+  }
+  finally {
+    if (previousTimezone === undefined) {
+      delete process.env.TZ
+    }
+    else {
+      process.env.TZ = previousTimezone
+    }
+  }
+})
+
+it.each([
+  ['2026-08-20', '2026-08-20T00:00:00.000Z'],
+  ['2026-08-20T10:00:00Z', '2026-08-20T10:00:00.000Z'],
+  ['2026-08-20T10:00:00+02:00', '2026-08-20T08:00:00.000Z'],
+  ['2026-08-20T10:00:00-0730', '2026-08-20T17:30:00.000Z'],
+  ['2026-08-20T24:00:00Z', '2026-08-21T00:00:00.000Z'],
+  ['2026-08-20T10:00:00.123456789012Z', '2026-08-20T10:00:00.123Z'],
+  ['Thu, 20 Aug 2026 10:00:00 GMT', '2026-08-20T10:00:00.000Z'],
+  ['Thu, 20 Aug 2026 10:00:00 UTC', '2026-08-20T10:00:00.000Z'],
+  ['Thu, 20 Aug 2026 10:00:00 PST', '2026-08-20T18:00:00.000Z'],
+])('preserves the meaning of explicit decision date %s', (value, expected) => {
+  const candidate = parseDecisionWithDate(value)
+  expect(candidate.valid).toBe(true)
+  expect(candidate.decisions[0]?.decidedAt?.toISOString()).toBe(expected)
+})
+
+it.each([
+  'not-a-date',
+  '2026-02-30T10:00',
+  '2026-08-20T24:01',
+  '2026-08-20T10:00:00+24:00',
+])('rejects invalid decision date %s with the existing typed diagnostic', (value) => {
+  const candidate = parseDecisionWithDate(value)
+  expect(candidate.valid).toBe(false)
+  expect(candidate.decisions).toEqual([])
+  expect(candidate.diagnostics).toContainEqual(expect.objectContaining({
+    code: 'AMBIGUOUS_DECISION',
+    severity: 'ERROR',
+    message: 'Decision DEC-RIC-031 has an invalid decided-at value.',
+  }))
 })

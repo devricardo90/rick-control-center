@@ -681,11 +681,117 @@ function parseDecisionStatus(
   return value as DecisionStatus
 }
 
+const DECISION_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/i
+const EXPLICIT_DECISION_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i
+const LEGACY_DECISION_TIMEZONE_PATTERN = /\s(UT|UTC|GMT|EST|EDT|CST|CDT|MST|MDT|PST|PDT)$/i
+const LEGACY_DECISION_TIMEZONE_OFFSETS: Readonly<Record<string, string>> = {
+  UT: '+00:00',
+  UTC: '+00:00',
+  GMT: '+00:00',
+  EST: '-05:00',
+  EDT: '-04:00',
+  CST: '-06:00',
+  CDT: '-05:00',
+  MST: '-07:00',
+  MDT: '-06:00',
+  PST: '-08:00',
+  PDT: '-07:00',
+}
+
+interface DecisionDateParts {
+  readonly year: number
+  readonly month: number
+  readonly day: number
+  readonly hour: number
+  readonly minute: number
+  readonly second: number
+  readonly fraction: string
+  readonly timezone: string
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+    return leapYear ? 29 : 28
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31
+}
+
+function readDecisionDateParts(value: string): DecisionDateParts | null {
+  const match = DECISION_DATE_PATTERN.exec(value)
+  if (!match) {
+    return null
+  }
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4] ?? '0'),
+    minute: Number(match[5] ?? '0'),
+    second: Number(match[6] ?? '0'),
+    fraction: match[7] ?? '',
+    timezone: match[8] ?? 'Z',
+  }
+}
+
+function hasValidDecisionCalendarDate(parts: DecisionDateParts): boolean {
+  return parts.month >= 1 && parts.month <= 12
+    && parts.day >= 1 && parts.day <= daysInMonth(parts.year, parts.month)
+}
+
+function hasValidDecisionTime(parts: DecisionDateParts): boolean {
+  if (parts.minute > 59 || parts.second > 59) {
+    return false
+  }
+  if (parts.hour <= 23) {
+    return true
+  }
+  return parts.hour === 24
+    && parts.minute === 0
+    && parts.second === 0
+    && !/[1-9]/.test(parts.fraction)
+}
+
+function canonicalDecisionDate(parts: DecisionDateParts): string {
+  const date = [parts.year, parts.month, parts.day]
+    .map((part, index) => String(part).padStart(index === 0 ? 4 : 2, '0'))
+    .join('-')
+  const time = [parts.hour, parts.minute, parts.second]
+    .map(part => String(part).padStart(2, '0'))
+    .join(':')
+  const milliseconds = parts.fraction.padEnd(3, '0').slice(0, 3) || '000'
+  const timezone = /^[+-]\d{4}$/.test(parts.timezone)
+    ? `${parts.timezone.slice(0, 3)}:${parts.timezone.slice(3)}`
+    : parts.timezone.toUpperCase()
+  return `${date}T${time}.${milliseconds}${timezone}`
+}
+
+function canonicalLegacyDecisionDate(value: string): string {
+  const timezoneMatch = LEGACY_DECISION_TIMEZONE_PATTERN.exec(value)
+  const timezone = timezoneMatch?.[1]
+  if (timezone) {
+    const offset = LEGACY_DECISION_TIMEZONE_OFFSETS[timezone.toUpperCase()]
+    if (offset) {
+      return `${value.slice(0, -timezone.length)}${offset}`
+    }
+  }
+  return EXPLICIT_DECISION_OFFSET_PATTERN.test(value) ? value : `${value} UTC`
+}
+
 function parseDecisionDate(value: string | undefined): Date | null | undefined {
   if (!value) {
     return null
   }
-  const parsed = new Date(value)
+
+  const parts = readDecisionDateParts(value)
+  if (!parts) {
+    const legacyDate = new Date(canonicalLegacyDecisionDate(value))
+    return Number.isNaN(legacyDate.getTime()) ? undefined : legacyDate
+  }
+  if (!hasValidDecisionCalendarDate(parts) || !hasValidDecisionTime(parts)) {
+    return undefined
+  }
+  const parsed = new Date(canonicalDecisionDate(parts))
   return Number.isNaN(parsed.getTime()) ? undefined : parsed
 }
 
