@@ -204,8 +204,12 @@ function sameProject(value: unknown, projectId: string): boolean {
   return value === projectId
 }
 
-function findUniqueById<T extends { readonly id?: unknown }>(rows: readonly T[], id: string): T | null {
-  const matches = rows.filter(row => row.id === id)
+function findUniqueByProjectAndId<T extends { readonly id?: unknown, readonly projectId?: unknown }>(
+  rows: readonly T[],
+  projectId: string,
+  id: string,
+): T | null {
+  const matches = rows.filter(row => row.projectId === projectId && row.id === id)
   return matches.length === 1 ? matches[0] ?? null : null
 }
 
@@ -370,10 +374,12 @@ function emitGlobalAmbiguities(
   targetTasks: readonly ResolverTaskInput[],
 ): void {
   const currentTasks = targetTasks.filter(taskCurrent).filter((task) => {
-    const sprint = isIdentifier(task.sprintId) ? findUniqueById(input.sprints, task.sprintId) : null
+    const sprint = isIdentifier(task.sprintId)
+      ? findUniqueByProjectAndId(input.sprints, input.projectId, task.sprintId)
+      : null
     const epic = task.epicId === null || task.epicId === undefined
       ? null
-      : isIdentifier(task.epicId) ? findUniqueById(input.epics, task.epicId) : null
+      : isIdentifier(task.epicId) ? findUniqueByProjectAndId(input.epics, input.projectId, task.epicId) : null
     return sprintCurrent(sprint) && epicCurrent(epic)
   })
   const sprints = input.sprints.filter(row => sameProject(row.projectId, input.projectId)
@@ -550,14 +556,18 @@ function emitTaskDiagnostics(
   const taskId = isIdentifier(task.id) ? task.id : null
   if (!taskId) return
   if (!taskCurrent(task)) return
-  const sprint = isIdentifier(task.sprintId) ? findUniqueById(input.sprints, task.sprintId) : null
+  const sprint = isIdentifier(task.sprintId)
+    ? findUniqueByProjectAndId(input.sprints, input.projectId, task.sprintId)
+    : null
   const sprintValid = Boolean(sprint && sameProject(sprint.projectId, input.projectId) && isIdentifier(sprint.id))
   if (!sprintValid) addMissingTask(diagnostics, input.projectId, taskId, 'SPRINT_REFERENCE')
   if (sprintValid && !sprintCurrent(sprint)) return
 
   let epic: ResolverEpicInput | null = null
   if (task.epicId !== null && task.epicId !== undefined) {
-    epic = isIdentifier(task.epicId) ? findUniqueById(input.epics, task.epicId) : null
+    epic = isIdentifier(task.epicId)
+      ? findUniqueByProjectAndId(input.epics, input.projectId, task.epicId)
+      : null
     const epicValid = Boolean(epic && sameProject(epic.projectId, input.projectId)
       && epic.sprintId === task.sprintId && isIdentifier(epic.id))
     if (!epicValid) {
@@ -583,9 +593,9 @@ function emitTaskDiagnostics(
     addMissingTask(diagnostics, input.projectId, taskId, 'STRATEGIC_CONTEXT')
   }
 
-  const requirements = requirementIds?.map(id => findUniqueById(input.requirements, id)) ?? []
-  const decisions = decisionIds?.map(id => findUniqueById(input.decisions, id)) ?? []
-  const sources = sourceIds?.map(id => findUniqueById(input.strategicSources, id)) ?? []
+  const requirements = requirementIds?.map(id => findUniqueByProjectAndId(input.requirements, input.projectId, id)) ?? []
+  const decisions = decisionIds?.map(id => findUniqueByProjectAndId(input.decisions, input.projectId, id)) ?? []
+  const sources = sourceIds?.map(id => findUniqueByProjectAndId(input.strategicSources, input.projectId, id)) ?? []
   if (requirementIds) {
     requirementIds.forEach((_id, index) => {
       const record = requirements[index]
@@ -611,15 +621,16 @@ function emitTaskDiagnostics(
     })
   }
 
-  const dependencyRows = input.dependencies.filter(edge => edge.taskId === taskId)
+  const dependencyRows = input.dependencies.filter(edge => edge.taskId === taskId
+    && (edge.projectId === input.projectId || !isIdentifier(edge.projectId)))
   const prerequisites: ResolverTaskInput[] = []
   for (const edge of dependencyRows) {
     if (!sameProject(edge.projectId, input.projectId) || !isIdentifier(edge.dependsOnTaskId)) {
       addMissingTask(diagnostics, input.projectId, taskId, 'DEPENDENCY_REFERENCE')
       continue
     }
-    const prerequisite = findUniqueById(input.tasks, edge.dependsOnTaskId)
-    if (!prerequisite || !sameProject(prerequisite.projectId, input.projectId)) {
+    const prerequisite = findUniqueByProjectAndId(input.tasks, input.projectId, edge.dependsOnTaskId)
+    if (!prerequisite) {
       addMissingTask(diagnostics, input.projectId, taskId, 'DEPENDENCY_REFERENCE')
       continue
     }
@@ -634,13 +645,13 @@ function emitTaskDiagnostics(
   }
   for (const requirement of requirements) {
     const source = requirement && isIdentifier(requirement.documentSourceId)
-      ? findUniqueById(input.strategicSources, requirement.documentSourceId)
+      ? findUniqueByProjectAndId(input.strategicSources, input.projectId, requirement.documentSourceId)
       : null
     if (requirement && source && sameProject(source.projectId, input.projectId)) emitFactDiagnostics(input, diagnostics, requirement, source)
   }
   for (const decision of decisions) {
     const source = decision && isIdentifier(decision.documentSourceId)
-      ? findUniqueById(input.strategicSources, decision.documentSourceId)
+      ? findUniqueByProjectAndId(input.strategicSources, input.projectId, decision.documentSourceId)
       : null
     if (decision && source && sameProject(source.projectId, input.projectId)) emitFactDiagnostics(input, diagnostics, decision, source)
   }
@@ -702,10 +713,12 @@ export function diagnoseReadiness(input: NextWorkResolverInput): readonly Readin
   const currentTaskIds = new Set(targetTasks
     .filter(task => taskCurrent(task))
     .filter((task) => {
-      const sprint = isIdentifier(task.sprintId) ? findUniqueById(input.sprints, task.sprintId) : null
+      const sprint = isIdentifier(task.sprintId)
+        ? findUniqueByProjectAndId(input.sprints, input.projectId, task.sprintId)
+        : null
       const epic = task.epicId === null || task.epicId === undefined
         ? null
-        : isIdentifier(task.epicId) ? findUniqueById(input.epics, task.epicId) : null
+        : isIdentifier(task.epicId) ? findUniqueByProjectAndId(input.epics, input.projectId, task.epicId) : null
       return sprintCurrent(sprint) && epicCurrent(epic)
     })
     .map(task => task.id)
@@ -716,7 +729,7 @@ export function diagnoseReadiness(input: NextWorkResolverInput): readonly Readin
     if (context.applicabilityEstablished === true && ids) ids.forEach(id => applicableDecisionIds.add(id))
   }
   const applicableDecisions = [...applicableDecisionIds]
-    .map(id => findUniqueById(input.decisions, id))
+    .map(id => findUniqueByProjectAndId(input.decisions, input.projectId, id))
     .filter((decision): decision is ResolverDecisionInput => Boolean(decision && sameProject(decision.projectId, projectId)))
   emitDecisionConflicts(input, diagnostics, applicableDecisions)
   return finaliseDiagnostics(diagnostics)

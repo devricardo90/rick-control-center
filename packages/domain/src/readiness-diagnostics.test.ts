@@ -164,4 +164,17 @@ describe('P0-032 readiness diagnostics', () => {
     expect(second).toEqual(first)
     expect(JSON.stringify(second)).toBe(JSON.stringify(first))
   })
+
+  it('isolates foreign task identity and dependency rows from structural diagnostics', () => {
+    const input = baseInput()
+    const diagnostics = diagnoseReadiness({
+      ...input,
+      tasks: [...input.tasks, { ...input.tasks[0], projectId: 'project-b' }],
+      dependencies: [{
+        projectId: 'project-b', taskId: 'task-a', dependsOnTaskId: 'blocked-b',
+      }],
+    })
+
+    expect(diagnostics).toEqual([])
+  })
 })

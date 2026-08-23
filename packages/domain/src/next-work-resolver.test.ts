@@ -93,6 +93,21 @@ function safeStrategicInput(): NextWorkResolverInput {
 }
 
 describe('resolver identity and result contract', () => {
+  it('keeps Project A selected when Project B reuses its task identity', () => {
+    const input = baseInput()
+    const result = resolveNextWork({
+      ...input,
+      tasks: [...input.tasks, { ...input.tasks[0], projectId: 'project-b' }],
+    })
+
+    expect(result).toMatchObject({
+      kind: 'SELECTED',
+      projectId: 'project-a',
+      task: { id: 'task-a' },
+    })
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DUPLICATE_TASK_ID')).toBe(false)
+  })
+
   it('emits the frozen resolver version and selected evidence', () => {
     const result = resolveNextWork(baseInput())
     expect(NEXT_WORK_RESOLVER_VERSION).toBe('P0_031_V1')
@@ -255,6 +270,50 @@ describe('dependency eligibility', () => {
 
   it('fails closed for a cross-project prerequisite', () => {
     expect(selectedTaskId(withPrerequisite('DONE', 'project-b'))).toBeNull()
+  })
+
+  it('ignores a foreign dependency row for a target task identity', () => {
+    const input = baseInput()
+    const result = resolveNextWork({
+      ...input,
+      dependencies: [{
+        projectId: 'project-b', taskId: 'task-a', dependsOnTaskId: 'blocked-b',
+      }],
+    })
+
+    expect(result).toMatchObject({ kind: 'SELECTED', task: { id: 'task-a' } })
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DEPENDENCY_REFERENCE')).toBe(false)
+  })
+
+  it('fails closed for a dependency row with malformed ownership', () => {
+    const input = baseInput()
+    const result = resolveNextWork({
+      ...input,
+      dependencies: [{ taskId: 'task-a', dependsOnTaskId: 'blocked-a' }],
+    })
+
+    expect(result).toMatchObject({ kind: 'NO_ELIGIBLE_WORK' })
+    expect(result.diagnostics.some(item => item.evidenceKey === 'DEPENDENCY_REFERENCE')).toBe(true)
+  })
+
+  it('resolves a prerequisite identity within the target project', () => {
+    const input = withPrerequisite('DONE')
+    const prerequisite = input.tasks.find(task => task.id === 'prerequisite')
+    if (!prerequisite) throw new Error('fixture requires a prerequisite')
+    const result = resolveNextWork({
+      ...input,
+      tasks: [...input.tasks, { ...prerequisite, projectId: 'project-b', status: 'TODO' }],
+    })
+
+    expect(result).toMatchObject({
+      kind: 'SELECTED',
+      task: { id: 'task-a' },
+      prerequisites: {
+        count: 1,
+        satisfiedCount: 1,
+        items: [{ id: 'prerequisite', status: 'DONE' }],
+      },
+    })
   })
 })
 

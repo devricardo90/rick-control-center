@@ -217,8 +217,12 @@ function isTaskPriority(value: unknown): value is TaskPriority {
   return typeof value === 'string' && Object.hasOwn(TASK_PRIORITY_RANK, value)
 }
 
-function findUniqueById<T extends { readonly id?: unknown }>(records: readonly T[], id: string): T | null {
-  const matches = records.filter(record => record.id === id)
+function findUniqueByProjectAndId<T extends { readonly id?: unknown, readonly projectId?: unknown }>(
+  records: readonly T[],
+  projectId: string,
+  id: string,
+): T | null {
+  const matches = records.filter(record => record.projectId === projectId && record.id === id)
   return matches.length === 1 ? matches[0] ?? null : null
 }
 
@@ -237,15 +241,16 @@ function buildPrerequisiteEvidence(
   input: NextWorkResolverInput,
   taskId: string,
 ): SelectedNextWorkResult['prerequisites'] | null {
-  const edges = input.dependencies.filter(edge => edge.taskId === taskId)
+  const edges = input.dependencies.filter(edge => edge.taskId === taskId
+    && (edge.projectId === input.projectId || !isIdentifier(edge.projectId)))
   const items: Array<{ id: string, status: TaskStatus }> = []
   const seen = new Set<string>()
 
   for (const edge of edges) {
     if (edge.projectId !== input.projectId || !isIdentifier(edge.dependsOnTaskId)) return null
     if (seen.has(edge.dependsOnTaskId)) return null
-    const prerequisite = findUniqueById(input.tasks, edge.dependsOnTaskId)
-    if (!prerequisite || prerequisite.projectId !== input.projectId) return null
+    const prerequisite = findUniqueByProjectAndId(input.tasks, input.projectId, edge.dependsOnTaskId)
+    if (!prerequisite) return null
     if (!isIdentifier(prerequisite.id) || !isTaskStatus(prerequisite.status)) return null
     seen.add(prerequisite.id)
     items.push({ id: prerequisite.id, status: prerequisite.status })
@@ -268,7 +273,7 @@ function hasValidTaskIdentity(input: NextWorkResolverInput, task: ResolverTaskIn
 } {
   if (!isIdentifier(task.id) || task.projectId !== input.projectId) return false
   if (!isIdentifier(task.sprintId)) return false
-  return findUniqueById(input.tasks, task.id) === task
+  return findUniqueByProjectAndId(input.tasks, input.projectId, task.id) === task
 }
 
 function hasValidTaskRanking(task: ResolverTaskInput): task is ResolverTaskInput & {
@@ -285,8 +290,8 @@ function resolveSprint(input: NextWorkResolverInput, sprintId: string): Resolver
   readonly code: string
   readonly sequence: number
 } | null {
-  const sprint = findUniqueById(input.sprints, sprintId)
-  if (!sprint || sprint.projectId !== input.projectId) return null
+  const sprint = findUniqueByProjectAndId(input.sprints, input.projectId, sprintId)
+  if (!sprint) return null
   if (!isIdentifier(sprint.id) || !isCanonicalCode(sprint.code)) return null
   if (!validSequence(sprint.sequence)) return null
   return { ...sprint, id: sprint.id, code: sprint.code, sequence: sprint.sequence }
@@ -356,8 +361,8 @@ function resolveEpic(
     return { state: 'VALID', epic: null, ineligible: false }
   }
   if (!isIdentifier(task.epicId)) return { state: 'INVALID' }
-  const epic = findUniqueById(input.epics, task.epicId)
-  if (!epic || epic.projectId !== input.projectId || epic.sprintId !== sprintId
+  const epic = findUniqueByProjectAndId(input.epics, input.projectId, task.epicId)
+  if (!epic || epic.sprintId !== sprintId
     || !isIdentifier(epic.id) || !isCanonicalCode(epic.code)) return { state: 'INVALID' }
   return {
     state: 'VALID',
@@ -370,8 +375,8 @@ function isSafeSource(
   input: NextWorkResolverInput,
   sourceId: string,
 ): ResolverStrategicSourceInput | null {
-  const source = findUniqueById(input.strategicSources, sourceId)
-  if (!source || source.projectId !== input.projectId) return null
+  const source = findUniqueByProjectAndId(input.strategicSources, input.projectId, sourceId)
+  if (!source) return null
   if (source.approvalStatus !== 'APPROVED' || source.syncStatus !== 'SYNCED') return null
   if (!hasCompleteSourcePointer(source) || !sourcePointerMatches(source)) return null
   return source
@@ -410,10 +415,10 @@ function evaluateStrategicContext(
   const decisionIds = readStringIdArray(context.decisionIds)
   const sourceIds = readStringIdArray(context.sourceIds)
   if (!requirementIds || !decisionIds || !sourceIds) return null
-  const requirements = requirementIds.map(id => findUniqueById(input.requirements, id))
+  const requirements = requirementIds.map(id => findUniqueByProjectAndId(input.requirements, input.projectId, id))
   if (requirements.some(record => !record || record.status !== 'ACTIVE'
     || !factHasSafeProvenance(input, record, sourceIds))) return null
-  const decisions = decisionIds.map(id => findUniqueById(input.decisions, id))
+  const decisions = decisionIds.map(id => findUniqueByProjectAndId(input.decisions, input.projectId, id))
   if (decisions.some(record => !record || (record.status !== 'APPROVED' && record.status !== 'REJECTED')
     || !factHasSafeProvenance(input, record, sourceIds))) return null
   const sources = sourceIds.map(id => isSafeSource(input, id))
