@@ -1,41 +1,54 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url))
-const IGNORED_DIRS = new Set(['node_modules', 'dist', '.nuxt', '.output'])
-const SCAN_DIRS = [
-  join(ROOT, 'packages', 'shared', 'src'),
-  join(ROOT, 'packages', 'domain', 'src'),
-  join(ROOT, 'packages', 'application', 'src'),
-  join(ROOT, 'packages', 'database', 'src'),
-  // Added by NDERCC-13: the external-provider adapters were outside this
-  // scan, so the Google Drive and GitHub clients — the code that handles
-  // untyped provider responses, and therefore the code most likely to
-  // reach for `any` — were never checked by the mandatory gate.
-  join(ROOT, 'packages', 'integrations', 'src'),
-  join(ROOT, 'apps', 'web'),
-]
+const EXTENSION_RE = /\.(?:ts|tsx|vue)$/
 
-function collectSourceFiles(dir) {
-  const results = []
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    const stat = statSync(full)
-    if (stat.isDirectory()) {
-      if (!IGNORED_DIRS.has(entry)) results.push(...collectSourceFiles(full))
-    }
-    else if (/\.(?:ts|tsx|vue)$/.test(entry) && !entry.endsWith('.d.ts')) {
-      results.push(full)
-    }
-  }
-  return results
+function git(root, args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8' })
+}
+
+function repositoryRoot() {
+  return git(process.cwd(), ['rev-parse', '--show-toplevel']).trim()
+}
+
+function comparePaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+export function discoverSourceFiles(root = repositoryRoot()) {
+  const repositoryRootPath = resolve(root)
+  const trackedAndUntracked = git(repositoryRootPath, [
+    'ls-files',
+    '--cached',
+    '--others',
+    '--exclude-standard',
+    '-z',
+  ])
+
+  return trackedAndUntracked
+    .split('\0')
+    .filter(Boolean)
+    .map(file => file.replace(/\\/g, '/'))
+    .filter(file => EXTENSION_RE.test(file) && !file.endsWith('.d.ts'))
+    .filter((file) => {
+      const absolutePath = resolve(repositoryRootPath, file)
+      return existsSync(absolutePath) && statSync(absolutePath).isFile()
+    })
+    .sort(comparePaths)
 }
 
 function sourceUnits(filePath, source) {
-  if (!filePath.endsWith('.vue')) return [{ source, lineOffset: 0, kind: filePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS }]
+  if (!filePath.endsWith('.vue')) {
+    return [{
+      source,
+      lineOffset: 0,
+      kind: filePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    }]
+  }
 
   const units = []
   const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi
@@ -43,54 +56,116 @@ function sourceUnits(filePath, source) {
   while ((match = scriptRe.exec(source)) !== null) {
     const blockStart = match.index + match[0].indexOf(match[1])
     const lineOffset = source.slice(0, blockStart).split('\n').length - 1
-    units.push({ source: match[1], lineOffset, kind: /\blang=(?:["'])tsx\1/i.test(match[0]) ? ts.ScriptKind.TSX : ts.ScriptKind.TS })
+    units.push({
+      source: match[1],
+      lineOffset,
+      kind: /\blang=(?:["'])tsx\1/i.test(match[0]) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    })
   }
   return units
 }
 
-const violations = []
+function violationLocation(sourceFile, position, lineOffset) {
+  const lineAndCharacter = sourceFile.getLineAndCharacterOfPosition(position)
+  return {
+    line: lineAndCharacter.line + 1 + lineOffset,
+    col: lineAndCharacter.character + 1,
+  }
+}
 
-for (const filePath of SCAN_DIRS.flatMap(collectSourceFiles)) {
-  const fileSource = readFileSync(filePath, 'utf8')
-  const rel = relative(ROOT, filePath).replace(/\\/g, '/')
+export function scanSourceFile(file, source) {
+  const violations = []
 
-  for (const unit of sourceUnits(filePath, fileSource)) {
-    const sf = ts.createSourceFile(filePath, unit.source, ts.ScriptTarget.ESNext, true, unit.kind)
-    const location = (pos) => {
-      const lc = sf.getLineAndCharacterOfPosition(pos)
-      return { line: lc.line + 1 + unit.lineOffset, col: lc.character + 1 }
-    }
+  for (const unit of sourceUnits(file, source)) {
+    const sourceFile = ts.createSourceFile(file, unit.source, ts.ScriptTarget.ESNext, true, unit.kind)
+    const location = position => violationLocation(sourceFile, position, unit.lineOffset)
 
     const tsIgnoreRe = /\/\/\s*@ts-ignore/g
     let match
     while ((match = tsIgnoreRe.exec(unit.source)) !== null) {
-      violations.push({ file: rel, ...location(match.index), rule: '@ts-ignore', text: match[0].trim() })
+      const tokenOffset = match[0].indexOf('@ts-ignore')
+      violations.push({
+        file,
+        ...location(match.index + tokenOffset),
+        rule: '@ts-ignore',
+        text: '@ts-ignore',
+      })
     }
 
     function visit(node) {
       if (node.kind === ts.SyntaxKind.AnyKeyword) {
         const isAsAny = node.parent?.kind === ts.SyntaxKind.AsExpression && node.parent.type === node
-        if (!isAsAny) violations.push({ file: rel, ...location(node.getStart(sf)), rule: 'explicit-any', text: ': any' })
+        if (!isAsAny) {
+          violations.push({
+            file,
+            ...location(node.getStart(sourceFile)),
+            rule: 'explicit-any',
+            text: 'any',
+          })
+        }
       }
+
       if (node.kind === ts.SyntaxKind.AsExpression && node.type.kind === ts.SyntaxKind.AnyKeyword) {
-        violations.push({ file: rel, ...location(node.getStart(sf)), rule: 'as-any', text: 'as any' })
+        const typeStart = node.type.getStart(sourceFile)
+        const asToken = /\bas\s*$/.exec(unit.source.slice(0, typeStart))
+        violations.push({
+          file,
+          ...location(asToken ? typeStart - asToken[0].length : node.getStart(sourceFile)),
+          rule: 'as-any',
+          text: 'as any',
+        })
       }
+
       if (node.kind === ts.SyntaxKind.CatchClause && node.block.statements.length === 0) {
-        violations.push({ file: rel, ...location(node.getStart(sf)), rule: 'empty-catch', text: 'catch { }' })
+        violations.push({
+          file,
+          ...location(node.getStart(sourceFile)),
+          rule: 'empty-catch',
+          text: 'catch {}',
+        })
       }
+
       ts.forEachChild(node, visit)
     }
-    visit(sf)
+
+    visit(sourceFile)
   }
+
+  return violations
 }
 
-if (violations.length === 0) {
-  console.log('✓ Forbidden-pattern scan: no violations found.')
-  process.exit(0)
+function compareViolations(left, right) {
+  return comparePaths(left.file, right.file)
+    || left.line - right.line
+    || left.col - right.col
+    || comparePaths(left.rule, right.rule)
+    || comparePaths(left.text, right.text)
 }
 
-console.error(`✗ Forbidden-pattern scan: ${violations.length} violation(s) found.\n`)
-for (const violation of violations) {
-  console.error(`  ${violation.file}:${violation.line}:${violation.col}  [${violation.rule}]  ${violation.text}`)
+export function scanRepository(root = repositoryRoot()) {
+  const repositoryRootPath = resolve(root)
+  return discoverSourceFiles(repositoryRootPath)
+    .flatMap(file => scanSourceFile(file, readFileSync(resolve(repositoryRootPath, file), 'utf8')))
+    .sort(compareViolations)
 }
-process.exit(1)
+
+export function formatViolation(violation) {
+  return `${violation.file}:${violation.line}:${violation.col}  [${violation.rule}]  ${violation.text}`
+}
+
+function isMainModule() {
+  return process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+}
+
+if (isMainModule()) {
+  const violations = scanRepository()
+
+  if (violations.length === 0) {
+    console.log('✓ Forbidden-pattern scan: no violations found.')
+    process.exit(0)
+  }
+
+  console.error(`✗ Forbidden-pattern scan: ${violations.length} violation(s) found.\n`)
+  for (const violation of violations) console.error(`  ${formatViolation(violation)}`)
+  process.exit(1)
+}

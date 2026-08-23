@@ -74,3 +74,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Repository quality review
+        run: pnpm quality:review
