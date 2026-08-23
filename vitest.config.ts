@@ -7,6 +7,7 @@ export default defineConfig({
     include: [
       'packages/*/src/**/*.{test,spec}.ts',
       'apps/*/tests/**/*.{test,spec}.ts',
+      'scripts/check-patterns.test.ts',
     ],
     coverage: {
       provider: 'v8',
