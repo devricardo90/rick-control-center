@@ -112,7 +112,9 @@ Result: **PASS**.
 - The audit used local deterministic extraction/resolver functions, existing tests and disposable PostgreSQL only.
 - Jira contract and state reads were read-only. No Google, Jira, GitHub or other provider mutation was performed during the audit.
 - No commit, push, PR creation, CI trigger or Jira transition occurred before all local proof passed.
-- Resolver and snapshot outputs expose sanitized identifiers and provenance only; document content and credential-shaped metadata remain excluded.
+- Snapshot summaries/list responses and synchronization responses expose sanitized identifiers and provenance and omit document content where those DTOs are designed to be summary-only.
+- The project-scoped full-snapshot endpoint deliberately returns the normalized document content as `contentText` through `toPublicDocumentSnapshot(snapshot)`; this is an authorized full-snapshot response, not a non-leaking summary.
+- The verified security guarantee is that the audited paths do not expose credentials, raw provider payloads or data belonging to another project.
 - High-confidence credential-shaped-value scanning and the final diff review found no password-bearing URL, provider token, bearer credential, private-key block or raw provider payload.
 - No product-path network/provider mutation or log-write primitive was exercised by the integrated audit scenarios.
 - Disposable credentials and the disposable PostgreSQL container were removed after use.
