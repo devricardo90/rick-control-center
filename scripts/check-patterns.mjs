@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
@@ -35,8 +35,9 @@ export function discoverSourceFiles(root = repositoryRoot()) {
     .map(file => file.replace(/\\/g, '/'))
     .filter(file => EXTENSION_RE.test(file) && !file.endsWith('.d.ts'))
     .filter((file) => {
-      const absolutePath = resolve(repositoryRootPath, file)
-      return existsSync(absolutePath) && statSync(absolutePath).isFile()
+      // lstat, never stat: a tracked symlink must not resolve to a target outside the repository.
+      const entry = lstatSync(resolve(repositoryRootPath, file), { throwIfNoEntry: false })
+      return entry !== undefined && entry.isFile()
     })
     .sort(comparePaths)
 }

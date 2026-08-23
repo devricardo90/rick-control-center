@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,6 +28,24 @@ function fixture(files: Record<string, string>, commit = true) {
   }
   return root
 }
+
+function canCreateSymlink() {
+  const probe = mkdtempSync(join(tmpdir(), 'check-patterns-probe-'))
+  try {
+    writeFileSync(join(probe, 'target.ts'), 'export const value = 1')
+    symlinkSync(join(probe, 'target.ts'), join(probe, 'link.ts'), 'file')
+    return true
+  }
+  catch {
+    // Any failure means the platform denies symlink creation (Windows without developer mode).
+    return false
+  }
+  finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+}
+
+const symlinkSupported = canCreateSymlink()
 
 afterEach(() => {
   while (temporaryRoots.length > 0) {
@@ -117,5 +135,20 @@ describe('repository-wide forbidden-pattern discovery and diagnostics', { timeou
       { file: 'm.ts', line: 1, col: 10, rule: 'explicit-any', text: 'any' },
       { file: 'z.ts', line: 1, col: 10, rule: 'explicit-any', text: 'any' },
     ])
+  })
+
+  it.skipIf(!symlinkSupported)('excludes tracked symlinks instead of scanning their external target', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'check-patterns-external-'))
+    temporaryRoots.push(outside)
+    writeFileSync(join(outside, 'external.ts'), 'const escaped: any = 1\n')
+
+    const root = fixture({ 'src/authored.ts': 'export const value = 1\n' }, false)
+    symlinkSync(join(outside, 'external.ts'), join(root, 'linked.ts'), 'file')
+    git(root, ['add', '--all'])
+    git(root, ['commit', '--quiet', '-m', 'fixture'])
+
+    expect(git(root, ['ls-files']).split('\n')).toContain('linked.ts')
+    expect(discoverSourceFiles(root)).toEqual(['src/authored.ts'])
+    expect(scanRepository(root)).toEqual([])
   })
 })
