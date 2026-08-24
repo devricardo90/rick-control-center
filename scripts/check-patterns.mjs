@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
-import { lstatSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
 
@@ -19,8 +19,44 @@ function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0
 }
 
+// Path-aware containment: a string prefix test would accept a sibling such as
+// `<root>-evil` and would mishandle case and separator differences.
+function isInsideRepository(canonicalRootPath, candidatePath) {
+  const relativePath = relative(canonicalRootPath, candidatePath)
+  if (relativePath === '' || relativePath === '..') return false
+  return !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+}
+
+function canonicalPathOf(absolutePath) {
+  try {
+    return realpathSync(absolutePath)
+  }
+  catch {
+    // Unreadable or removed between lstat and canonicalisation: not scannable.
+    return undefined
+  }
+}
+
+function isRepositoryAuthoredFile(canonicalRootPath, repositoryRootPath, file) {
+  const absolutePath = resolve(repositoryRootPath, file)
+
+  // lstat, never stat: a tracked symlink must not resolve to a target outside the repository.
+  // `undefined` here is the deleted-but-tracked case and must not throw.
+  const entry = lstatSync(absolutePath, { throwIfNoEntry: false })
+  if (entry === undefined || !entry.isFile()) return false
+
+  // lstat only refuses the FINAL component. Canonicalise the whole path so a symlinked
+  // intermediate directory cannot redirect the scan outside the repository.
+  const canonicalPath = canonicalPathOf(absolutePath)
+  return canonicalPath !== undefined && isInsideRepository(canonicalRootPath, canonicalPath)
+}
+
 export function discoverSourceFiles(root = repositoryRoot()) {
   const repositoryRootPath = resolve(root)
+  // Deliberately not tolerant of failure: an uncanonicalisable root would make every
+  // candidate compare as "outside" and silently scan nothing, which is a gate that passes
+  // by doing no work. Failing loudly is the only safe behaviour for a mandatory gate.
+  const canonicalRootPath = realpathSync(repositoryRootPath)
   const trackedAndUntracked = git(repositoryRootPath, [
     'ls-files',
     '--cached',
@@ -29,16 +65,13 @@ export function discoverSourceFiles(root = repositoryRoot()) {
     '-z',
   ])
 
+  // Git paths are used verbatim: `ls-files -z` already emits `/` separators on every
+  // platform, and a literal backslash is a legal character in a POSIX filename.
   return trackedAndUntracked
     .split('\0')
     .filter(Boolean)
-    .map(file => file.replace(/\\/g, '/'))
     .filter(file => EXTENSION_RE.test(file) && !file.endsWith('.d.ts'))
-    .filter((file) => {
-      // lstat, never stat: a tracked symlink must not resolve to a target outside the repository.
-      const entry = lstatSync(resolve(repositoryRootPath, file), { throwIfNoEntry: false })
-      return entry !== undefined && entry.isFile()
-    })
+    .filter(file => isRepositoryAuthoredFile(canonicalRootPath, repositoryRootPath, file))
     .sort(comparePaths)
 }
 

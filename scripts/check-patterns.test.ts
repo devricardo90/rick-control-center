@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -46,6 +46,27 @@ function canCreateSymlink() {
 }
 
 const symlinkSupported = canCreateSymlink()
+
+// A literal backslash is a legal filename character on POSIX but a separator on Windows,
+// where `we\ird.ts` would become the directory `we` containing `ird.ts` instead.
+const BACKSLASH_NAME = 'we\\ird.ts'
+
+function canCreateBackslashFilename() {
+  const probe = mkdtempSync(join(tmpdir(), 'check-patterns-backslash-'))
+  try {
+    writeFileSync(join(probe, BACKSLASH_NAME), 'export const value = 1')
+    return readdirSync(probe).includes(BACKSLASH_NAME)
+  }
+  catch {
+    // Windows rejects the name outright; the escape this guards cannot exist there.
+    return false
+  }
+  finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+}
+
+const backslashFilenameSupported = canCreateBackslashFilename()
 
 afterEach(() => {
   while (temporaryRoots.length > 0) {
@@ -149,6 +170,53 @@ describe('repository-wide forbidden-pattern discovery and diagnostics', { timeou
 
     expect(git(root, ['ls-files']).split('\n')).toContain('linked.ts')
     expect(discoverSourceFiles(root)).toEqual(['src/authored.ts'])
+    expect(scanRepository(root)).toEqual([])
+  })
+})
+
+describe('repository-authored filesystem boundary', { timeout: 30_000 }, () => {
+  it.skipIf(!backslashFilenameSupported)('scans a tracked filename containing a literal backslash', () => {
+    const root = fixture({
+      'src/authored.ts': 'export const value = 1\n',
+      [BACKSLASH_NAME]: 'const value: any = 1\n',
+    })
+
+    // Git emits the name verbatim under -z; rewriting the backslash to a separator would
+    // point at a path that does not exist and silently drop the file from the gate.
+    expect(git(root, ['ls-files', '-z']).split('\0').filter(Boolean)).toContain(BACKSLASH_NAME)
+    expect(discoverSourceFiles(root)).toContain(BACKSLASH_NAME)
+    expect(scanRepository(root)).toEqual([
+      { file: BACKSLASH_NAME, line: 1, col: 14, rule: 'explicit-any', text: 'any' },
+    ])
+  })
+
+  it.skipIf(!symlinkSupported)('rejects a path escaping through a symlinked intermediate directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'check-patterns-external-'))
+    temporaryRoots.push(outside)
+    writeFileSync(join(outside, 'escaped.ts'), 'const escaped: any = 1\n')
+
+    const root = fixture({
+      'authored.ts': 'export const value = 1\n',
+      'pkg/escaped.ts': 'export const clean = 1\n',
+    })
+    // lstat only refuses the final component, so the escape is mounted one level up.
+    rmSync(join(root, 'pkg'), { recursive: true, force: true })
+    symlinkSync(outside, join(root, 'pkg'), 'dir')
+
+    expect(git(root, ['ls-files']).split('\n')).toContain('pkg/escaped.ts')
+    expect(discoverSourceFiles(root)).toEqual(['authored.ts'])
+    expect(scanRepository(root)).toEqual([])
+  })
+
+  it('excludes deleted-but-tracked files without crashing', () => {
+    const root = fixture({
+      'src/kept.ts': 'export const value = 1\n',
+      'src/gone.ts': 'const value: any = 1\n',
+    })
+    rmSync(join(root, 'src', 'gone.ts'))
+
+    expect(git(root, ['ls-files']).split('\n')).toContain('src/gone.ts')
+    expect(discoverSourceFiles(root)).toEqual(['src/kept.ts'])
     expect(scanRepository(root)).toEqual([])
   })
 })

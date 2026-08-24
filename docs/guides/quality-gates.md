@@ -47,6 +47,37 @@ worktree, and equivalent local artifacts. The scanner does not traverse the
 filesystem independently, so ignored paths cannot enter through environment-
 dependent directory traversal.
 
+## Filesystem boundary
+
+Discovery produces Git paths; each path is then validated against the real
+filesystem before any content is read. This is part of the repository-authored
+security boundary, not an optimisation. Its purpose is to guarantee that the
+mandatory gate only ever reads files that the repository itself authors.
+
+- **Only regular-file entries are scanned.** Directories and every non-regular
+  entry are excluded.
+- **Final-component symlinks are excluded.** The scanner uses `lstat`, never
+  `stat`, so a Git-tracked symlink is inspected as a link and is never resolved
+  to its target. A tracked `.ts` symlink pointing outside the repository is
+  dropped at discovery and its target is never read.
+- **Paths whose resolved location escapes the repository through symlinked path
+  components are excluded.** `lstat` refuses only the final component, so every
+  surviving candidate is canonicalised with `realpath` and rejected unless its
+  real location is contained within the canonical repository root. Containment
+  is computed with path-aware relative resolution — never a string prefix test,
+  which would accept a sibling directory such as `<root>-external`.
+- **Git paths are used verbatim.** `git ls-files -z` already emits repository
+  paths with `/` separators on every platform, so no separator rewriting is
+  performed. A literal backslash is a legal character in a POSIX filename and
+  must not be reinterpreted as a directory separator; doing so would resolve to
+  a non-existent path and silently drop an authored file from the gate.
+- **A tracked path missing from the working tree is skipped without error.**
+  This is the ordinary deleted-but-tracked state and is not a failure.
+
+`lstat` must not be replaced with `stat`, and the canonical containment check
+must not be removed. Both are load-bearing controls, and both are covered by
+regression tests in `scripts/check-patterns.test.ts`.
+
 ## Blocking rules
 
 The following rules remain mandatory and blocking:
@@ -80,8 +111,10 @@ pattern. Re-run the command and then the relevant typecheck/tests.
 
 The regression coverage in `scripts/check-patterns.test.ts` uses temporary Git
 repositories to prove blocking rules, compliant TS/TSX/Vue sources, root and
-future directories, ignored artifacts, declaration exclusion, and deterministic
-discovery/diagnostics.
+future directories, ignored artifacts, declaration exclusion, deterministic
+discovery/diagnostics, and the filesystem boundary described above. Boundary
+cases that cannot exist on a given platform — symlink creation and literal
+backslash filenames on Windows — are skipped there and execute in Linux CI.
 
 ## CI usage
 
