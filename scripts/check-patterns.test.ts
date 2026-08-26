@@ -1,9 +1,46 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import type { PathLike } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { join, resolve } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { discoverSourceFiles, scanRepository } from './check-patterns.mjs'
+
+interface RealpathFailure {
+  readonly path: string
+  readonly code: string
+}
+
+interface RealpathRedirect {
+  readonly path: string
+  readonly to: string
+}
+
+// Canonicalisation outcomes are injected rather than provoked. chmod/ACL tricks behave
+// differently on Windows, POSIX-as-root and CI containers, and symlink creation needs a
+// privilege Windows withholds by default — so a purely filesystem-based test would be
+// skipped exactly where it matters. Injection makes every branch deterministic everywhere.
+const realpathOverride = vi.hoisted<{
+  failure: RealpathFailure | null
+  redirect: RealpathRedirect | null
+}>(() => ({ failure: null, redirect: null }))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const realpathSyncMock = (path: PathLike): string => {
+    const requested = path.toString()
+    const { failure, redirect } = realpathOverride
+    if (failure !== null && requested === failure.path) {
+      throw Object.assign(
+        new Error(`${failure.code}: injected canonicalisation failure, realpath '${requested}'`),
+        { code: failure.code },
+      )
+    }
+    if (redirect !== null && requested === redirect.path) return redirect.to
+    return actual.realpathSync(path, 'utf8')
+  }
+  return { ...actual, realpathSync: realpathSyncMock }
+})
 
 const temporaryRoots: string[] = []
 
@@ -68,7 +105,14 @@ function canCreateBackslashFilename() {
 
 const backslashFilenameSupported = canCreateBackslashFilename()
 
+beforeEach(() => {
+  realpathOverride.failure = null
+  realpathOverride.redirect = null
+})
+
 afterEach(() => {
+  realpathOverride.failure = null
+  realpathOverride.redirect = null
   while (temporaryRoots.length > 0) {
     const root = temporaryRoots.pop()
     if (root) rmSync(root, { recursive: true, force: true })
@@ -219,4 +263,86 @@ describe('repository-authored filesystem boundary', { timeout: 30_000 }, () => {
     expect(discoverSourceFiles(root)).toEqual(['src/kept.ts'])
     expect(scanRepository(root)).toEqual([])
   })
+
+  it.skipIf(!symlinkSupported)('rejects a sibling directory whose path shares the repository-root prefix', () => {
+    const root = fixture({
+      'authored.ts': 'export const value = 1\n',
+      'pkg/escaped.ts': 'export const clean = 1\n',
+    })
+
+    // A literal sibling, not merely a nearby directory: `<root>` and `<root>-external`
+    // share a complete string prefix, which is the exact shape naive containment accepts.
+    const external = `${root}-external`
+    temporaryRoots.push(external)
+    mkdirSync(external, { recursive: true })
+    writeFileSync(join(external, 'escaped.ts'), 'const escaped: any = 1\n')
+
+    // Routed through an intermediate symlink, so lstat on the final component cannot catch it.
+    rmSync(join(root, 'pkg'), { recursive: true, force: true })
+    symlinkSync(external, join(root, 'pkg'), 'dir')
+
+    const canonicalRoot = realpathSync(root)
+    const canonicalEscaped = realpathSync(join(root, 'pkg', 'escaped.ts'))
+
+    // Precondition, asserted rather than assumed: this fixture only proves anything if a
+    // naive `candidate.startsWith(root)` check WOULD wrongly accept the escaped path.
+    expect(canonicalEscaped.startsWith(canonicalRoot)).toBe(true)
+
+    expect(git(root, ['ls-files']).split('\n')).toContain('pkg/escaped.ts')
+    expect(discoverSourceFiles(root)).toEqual(['authored.ts'])
+    expect(scanRepository(root)).toEqual([])
+  })
+})
+
+describe('candidate canonicalisation failure policy', { timeout: 30_000 }, () => {
+  it('tolerates a candidate deleted between lstat and canonicalisation', () => {
+    const root = fixture({
+      'src/kept.ts': 'export const value = 1\n',
+      'src/racy.ts': 'const value: any = 1\n',
+    })
+    realpathOverride.failure = { path: resolve(root, 'src/racy.ts'), code: 'ENOENT' }
+
+    // The deletion race is the one benign case: lstat already confirmed a regular file, so
+    // ENOENT here means it vanished in between and there is nothing left to scan.
+    expect(discoverSourceFiles(root)).toEqual(['src/kept.ts'])
+    expect(scanRepository(root)).toEqual([])
+  })
+
+  it('rejects a canonical path in a sibling directory sharing the repository-root prefix', () => {
+    const root = fixture({
+      'authored.ts': 'export const value = 1\n',
+      'pkg/escaped.ts': 'const escaped: any = 1\n',
+    })
+    const canonicalRoot = realpathSync(root)
+
+    // Exactly what an intermediate symlink to `<root>-external` canonicalises to. Injected so
+    // the sibling-prefix escape is still covered on platforms that cannot create symlinks —
+    // the symlink-driven twin of this case lives in the filesystem-boundary suite above.
+    const escapedCanonical = join(`${canonicalRoot}-external`, 'escaped.ts')
+    realpathOverride.redirect = { path: resolve(root, 'pkg/escaped.ts'), to: escapedCanonical }
+
+    // Precondition, asserted rather than assumed: this fixture only proves anything if a
+    // naive `candidate.startsWith(root)` check WOULD wrongly accept the escaped path.
+    expect(escapedCanonical.startsWith(canonicalRoot)).toBe(true)
+
+    expect(git(root, ['ls-files']).split('\n')).toContain('pkg/escaped.ts')
+    expect(discoverSourceFiles(root)).toEqual(['authored.ts'])
+    expect(scanRepository(root)).toEqual([])
+  })
+
+  it.each(['EACCES', 'ELOOP', 'ENAMETOOLONG', 'EMFILE', 'ENFILE', 'EPERM', 'EUNKNOWNFAILURE'])(
+    'fails closed when canonicalising a confirmed authored file fails with %s',
+    (code) => {
+      const root = fixture({
+        'src/kept.ts': 'export const value = 1\n',
+        'src/unreadable.ts': 'const value: any = 1\n',
+      })
+      realpathOverride.failure = { path: resolve(root, 'src/unreadable.ts'), code }
+
+      // Swallowing this would drop a confirmed authored file from a mandatory gate, so the
+      // gate would pass by scanning less than it should. It must fail the run instead.
+      expect(() => discoverSourceFiles(root)).toThrowError(new RegExp(code))
+      expect(() => scanRepository(root)).toThrowError(new RegExp(code))
+    },
+  )
 })

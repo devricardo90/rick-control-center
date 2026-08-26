@@ -1,4 +1,8 @@
-#!/usr/bin/env node
+// No shebang: this script is always invoked explicitly as `node scripts/check-patterns.mjs`,
+// and `scripts/check-patterns.test.ts` imports it through Vite. On a default Git-for-Windows
+// checkout (`core.autocrlf=true`) a shebang line arrives as CRLF, which Vite's hashbang
+// handling does not strip, breaking collection of the whole suite with
+// `SyntaxError: Invalid or unexpected token` while Linux CI stays green.
 import { execFileSync } from 'node:child_process'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
@@ -27,13 +31,23 @@ function isInsideRepository(canonicalRootPath, candidatePath) {
   return !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
 }
 
+function isMissingEntryError(error) {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+}
+
 function canonicalPathOf(absolutePath) {
   try {
     return realpathSync(absolutePath)
   }
-  catch {
-    // Unreadable or removed between lstat and canonicalisation: not scannable.
-    return undefined
+  catch (error) {
+    // ENOENT alone is tolerable, and only because lstat already confirmed a regular file
+    // here: the entry was deleted in between, so there is nothing left to scan. Every other
+    // failure — EACCES, ELOOP, ENAMETOOLONG, EMFILE, ENFILE, EPERM, or anything unknown —
+    // means a confirmed authored file could NOT be canonicalised. Dropping it would remove
+    // it from a mandatory gate silently, letting the gate pass by scanning less than it
+    // should, so those propagate and fail the run.
+    if (isMissingEntryError(error)) return undefined
+    throw error
   }
 }
 

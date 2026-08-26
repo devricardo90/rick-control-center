@@ -73,6 +73,13 @@ mandatory gate only ever reads files that the repository itself authors.
   a non-existent path and silently drop an authored file from the gate.
 - **A tracked path missing from the working tree is skipped without error.**
   This is the ordinary deleted-but-tracked state and is not a failure.
+- **A canonicalisation failure fails the gate.** Only `ENOENT` is tolerated,
+  and only as the deletion race: `lstat` already confirmed a regular file, so
+  the entry vanished in between and there is nothing left to scan. Every other
+  canonicalisation error — `EACCES`, `ELOOP`, `ENAMETOOLONG`, descriptor
+  exhaustion, `EPERM`, or an unrecognised code — aborts the run instead of
+  dropping the candidate. Silently skipping a confirmed authored file would let
+  a mandatory gate pass while scanning less than it should.
 
 `lstat` must not be replaced with `stat`, and the canonical containment check
 must not be removed. Both are load-bearing controls, and both are covered by
@@ -115,6 +122,10 @@ future directories, ignored artifacts, declaration exclusion, deterministic
 discovery/diagnostics, and the filesystem boundary described above. Boundary
 cases that cannot exist on a given platform — symlink creation and literal
 backslash filenames on Windows — are skipped there and execute in Linux CI.
+Canonicalisation outcomes are injected rather than provoked through filesystem
+permissions, so the tolerated-`ENOENT` race, the fail-closed policy for every
+other error, and the sibling-prefix containment case all execute on every
+platform, including where symlinks cannot be created.
 
 ## CI usage
 
