@@ -25,7 +25,10 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P0-003 Configure PostgreSQL, migrations, and local development.
 - P0-004 Establish environment and secret-handling policy.
 - P0-005 Add CI validation and protected completion gates.
-- P0-006 Implement structured audit-safe logging.
+- P0-006 Implement audit-safe structured logging.
+- P1-007 Enforce repository-wide zero-any and forbidden-pattern quality gates in CI.
+- P1-008 Enforce GitHub governed-branch protection/rulesets so required CI and review gates cannot be bypassed on main.
+- P2-009 Configure stable local development hostname with Portless, preserving dedicated database ports and validating Nuxt/HMR/auth callbacks before adoption.
 
 ### EPIC 1 — Identity, workspace, and projects
 - P0-010 Implement user and workspace foundations.
@@ -49,15 +52,23 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P0-032 Detect blocked, ambiguous, and conflicting items.
 - P1-033 Synchronize approved items with Jira.
 - P1-034 Preserve external IDs and idempotent Jira operations.
-- P1-035 Display readiness and dependency status.
+- P1-035 Display backlog readiness and dependency status.
+- P1-038 Implement governed SDD specification lifecycle: create, validate, version, approve, supersede and trace implementation specs before Execution Contract generation.
 
 ### EPIC 4 — Execution Contract
 - P0-040 Define the canonical schema.
 - P0-041 Generate immutable contracts from approved inputs.
 - P0-042 Validate completeness before execution.
 - P0-043 Hash and version every contract.
+- P0-046 Implement deterministic state-transition decision engine.
+- P0-047 Implement deterministic gate engine for scope, validation, evidence, risk and approval outcomes.
+- P0-048 Implement bounded loop controller with retry limits, backoff and explicit stop conditions.
+- P0-049 Integrate the Deterministic Orchestrator Kernel and persist replayable decision records.
+
+Kernel component mapping: `ContractCompiler` = P0-040 through P0-043; `TransitionEngine` = P0-046; `GateEngine` = P0-047; `LoopController` = P0-048; Checkpoint/Recovery Engine = P0-064, P1-065 and P1-111; SideEffect Executor = P0-083 through P1-086 plus P1-090 through P1-093. P0-049 is the integration boundary that proves these components share one deterministic authority model rather than separate agent-controlled flows.
+
 - P1-044 Render human-readable contract review.
-- P1-045 Store provenance and linked requirements.
+- P1-045 Store contract provenance and linked requirements.
 
 ### EPIC 5 — Risk Engine and approvals
 - P0-050 Implement deterministic risk scoring.
@@ -75,6 +86,7 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P0-064 Persist checkpoints, events, and outcomes.
 - P1-065 Support controlled retry and resume.
 - P1-066 Prevent concurrent conflicting executions.
+- P1-067 Implement RICK Verification Gauntlet with Builder/Critic separation, fresh-context independent review, controlled fan-out/fan-in and Integration Review.
 
 ### EPIC 7 — Validation and evidence
 - P0-070 Execute contract-defined validation commands.
@@ -82,7 +94,9 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P0-072 Capture diffs, logs, and artifacts.
 - P0-073 Evaluate completion against acceptance criteria.
 - P1-074 Build evidence bundles linked to executions.
-- P1-075 Display failures and remediation context.
+- P1-075 Display validation failures and remediation context.
+- P1-076 Implement canonical `rick-qa-review` adversarial QA gate with structured scenarios, findings, severity and evidence.
+- P1-077 Implement machine-evaluable Definition of Done gate that consumes acceptance, validation, review, QA, CI, delivery, documentation and Jira evidence without allowing the implementation agent to self-declare Done.
 
 ### EPIC 8 — Git and delivery lifecycle
 - P0-080 Create isolated execution branches.
@@ -111,6 +125,7 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P1-106 Implement approval and risk panels.
 - P2-107 Implement responsive mobile states.
 - P2-108 Implement accessibility and keyboard navigation.
+- P1-109 Implement Agent Monitor UI with agent tree, roles, ownership, runtime state, gates and evidence drill-down.
 
 ### EPIC 11 — Recovery, observability, and administration
 - P1-110 Implement failed, blocked, and cancelled views.
@@ -119,20 +134,25 @@ Each item must include objective, scope, exclusions, acceptance criteria, depend
 - P2-113 Implement integration diagnostics.
 - P2-114 Implement retention and archival policies.
 - P2-115 Implement administrative policy configuration.
+- P1-116 Perform end-to-end release certification, recovery drill and final MVP evidence.
 
 ## 4. MVP execution sequence
 
 - Sprint 0: P0-001 through P0-006.
-- Sprint 1: P0-010 through P0-012, P0-020, and P0-021.
-- Sprint 2: P0-022 and P0-030 through P0-032.
-- Sprint 3: P0-040 through P0-043.
+- Sprint 1: P0-010 through P0-012, P0-020 and P0-021.
+- Sprint 2: P0-022, P0-030 through P0-032.
+- **Quality Hardening Gate — complete before Sprint 3:** P1-007 and P1-008.
+- Sprint 3: P1-038 first, then P0-040 through P0-043.
+- **Kernel Foundation Gate — must complete before Sprint 4:** P0-046 through P0-049.
 - Sprint 4: P0-050 through P0-053.
 - Sprint 5: P0-060 through P0-064.
 - Sprint 6: P0-070 through P0-073.
+- **Quality & Completion Gate — complete after Sprint 6 and before the Verification Gauntlet:** P1-076 and P1-077.
+- **Verification Gauntlet Gate — complete after Sprint 6 and before Sprint 7:** P1-067.
 - Sprint 7: P0-080 through P0-083.
-- Sprint 8: P1-033, P1-034, and P1-090 through P1-092.
-- Sprint 9: P1-100 through P1-106.
-- Sprint 10: end-to-end hardening, recovery, and release evidence.
+- Sprint 8: P1-033, P1-034 and P1-090 through P1-092.
+- Sprint 9: P1-100 through P1-106 plus P1-109 Agent Monitor UI.
+- Sprint 10: P1-065, P1-066, P1-074, P1-075, P1-093, P1-110 through P1-112 and P1-116; include end-to-end hardening, recovery drills, reconciliation and final release evidence.
 
 ## 5. Definition of Ready
 
@@ -140,12 +160,12 @@ An item is Ready only when its objective is unambiguous, dependencies are satisf
 
 ## 6. Definition of Done
 
-An item is Done only when implementation is complete, all required validations pass, evidence is stored, traceability is preserved, the approved Git operation is complete, Jira reflects the final state, and no material deviation from the Execution Contract remains unresolved.
+The canonical Definition of Done is RIC-012 Section 14. An item is not Done merely because implementation or local tests are complete. Closure requires all applicable acceptance, validation, code-quality review, code review, adversarial QA, exact-head CI, authorized delivery/merge, post-merge checks when required, documentation, evidence and Jira synchronization conditions to be satisfied with no unresolved blocking finding. Before P1-076/P1-077 are implemented, independent control evaluates these conditions directly from evidence; afterward their structured gate results become mandatory closure inputs.
 
 ## 7. Governance
 
-Backlog changes that alter MVP scope, execution safety, source-of-truth boundaries, or approval policy require a documented decision. Priority changes must not bypass dependencies or risk controls. An agent may propose backlog changes but may not silently redefine strategic scope.
+Backlog changes that alter MVP scope, execution safety, source-of-truth boundaries or approval policy require a documented decision. Priority changes must not bypass dependencies or risk controls. An agent may propose backlog changes but may not silently redefine strategic scope. To prevent roadmap drift, any future capability explicitly designated as a hardening gate, orchestration safeguard, SDD authority, operator-observability surface or release-certification requirement must also receive a Jira planning anchor before its execution window; the anchor remains `A fazer` and creates no implementation authority until its own approved SDD/Execution Contract is activated.
 
 ## 8. Exit condition
 
-This baseline is complete when all P0 and required P1 items exist in Jira with dependencies, acceptance criteria, and evidence requirements, and Sprint 0 can be generated as deterministic Execution Contracts without unresolved strategic ambiguity.
+This backlog baseline is complete when all P0 and required P1 items are represented in Jira with dependencies, acceptance criteria and evidence requirements, and when Sprint 0 can be generated as deterministic Execution Contracts without unresolved strategic ambiguity.
