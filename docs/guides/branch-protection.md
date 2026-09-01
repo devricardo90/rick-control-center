@@ -71,14 +71,14 @@ a direct `main` commit could not be satisfied without an explicit break-glass.
 
 ## Zero required approvals is not "no review"
 
-The ruleset requires no approving review, because this repository has one human
+The ruleset will require no approving review, because this repository has one human
 collaborator and GitHub does not let a PR author approve their own PR — any
 non-zero value would make bypass the only way to merge anything, which is worse
 than requiring none. Review is not skipped; it is enforced at the Jira/RIC
 layer, where independent review must return `CLEAN` before merge is authorised.
 
 `required_review_thread_resolution` is the part of the review gate that GitHub
-*can* enforce for a solo author, so it is on.
+*can* enforce for a solo author, so it will be on.
 
 When a second human collaborator or an approval-capable App exists, raise
 `required_approving_review_count` to `1` and enable `require_last_push_approval`
@@ -100,6 +100,19 @@ Note that `ci.yml` runs on `push` only for `[main, feat/**, fix/**, chore/**]`.
 A branch outside those globs (for example `docs/**`) gets no pre-PR push run,
 but a PR into `main` always triggers the `pull_request` run, so the required
 check is always produced. Closing that trigger gap is to be tracked separately.
+
+## Resolving the ruleset id
+
+Every command below needs the ruleset id. Resolve it deterministically by name
+rather than hardcoding it — read-only:
+
+```bash
+RULESET_ID=$(gh api repos/devricardo90/rick-control-center/rulesets \
+  --jq '.[] | select(.name=="governed-main") | .id')
+echo "$RULESET_ID"
+```
+
+If that prints nothing, the ruleset does not exist and nothing below applies.
 
 ## Verifying the live policy
 
@@ -128,19 +141,6 @@ the configuration exists, it targets `main`, and its rules are active on `main`.
 **Do not verify by attempting a force-push, a deletion, or a direct push.** If
 the configuration were wrong, the probe would cause exactly the damage the
 control exists to prevent. Verification is read-only.
-
-## Resolving the ruleset id
-
-Every command below needs the ruleset id. Resolve it deterministically by name
-rather than hardcoding it — read-only:
-
-```bash
-RULESET_ID=$(gh api repos/devricardo90/rick-control-center/rulesets \
-  --jq '.[] | select(.name=="governed-main") | .id')
-echo "$RULESET_ID"
-```
-
-If that prints nothing, the ruleset does not exist and nothing below applies.
 
 ## Changing enforcement state — `PUT`, never `PATCH`
 
