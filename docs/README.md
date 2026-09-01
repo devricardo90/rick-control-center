@@ -40,6 +40,7 @@ never itself authorizes execution outside an approved Execution Contract
 | [`decisions/DEC-RIC-002-document-source-persistence-boundary.md`](decisions/DEC-RIC-002-document-source-persistence-boundary.md) | Project-owned `DocumentSource` registry; separated approval/sync status; no content/version storage yet (NDERCC-12) |
 | [`decisions/DEC-RIC-003-google-drive-credential-and-snapshot-boundary.md`](decisions/DEC-RIC-003-google-drive-credential-and-snapshot-boundary.md) | Server-only `GOOGLE_SERVICE_ACCOUNT_JSON`; reader-only Drive access; immutable normalized `DocumentSnapshot` with SHA-256 checksum (NDERCC-13) |
 | [`decisions/DEC-RIC-008-pluggable-agent-harness-architecture.md`](decisions/DEC-RIC-008-pluggable-agent-harness-architecture.md) | Approved **target** agent-harness architecture — `AgentRuntimePort`, presets, append-only events, checkpoint/resume, replay, trajectory; Cordis optional-only; `NOT IMPLEMENTED` (NDERCC-33) |
+| [`decisions/DEC-RIC-009-governed-branch-protection.md`](decisions/DEC-RIC-009-governed-branch-protection.md) | Governed `main` ruleset — required `Validate` check, PR-only, squash-only, force-push and deletion blocked, no bypass actors, zero required approvals with recorded rationale; `APPROVED TARGET / NOT YET ACTIVATED` (NDERCC-22) |
 
 ## Execution contracts
 
@@ -69,6 +70,7 @@ repository, kept in sync with it.
 | Doc | Covers |
 |---|---|
 | [`guides/local-development.md`](guides/local-development.md) | Clone-to-running-app setup, validation commands, database reset, troubleshooting |
+| [`guides/branch-protection.md`](guides/branch-protection.md) | Governed `main` policy in practice: what will be enforced, working under it, read-only verification, break-glass and prepared rollback; target not yet activated |
 
 For `@rick/database`-specific detail (schema, domain models, authentication
 internals) beyond what the local-development guide covers end to end, see
