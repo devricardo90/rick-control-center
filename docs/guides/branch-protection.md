@@ -5,13 +5,21 @@ reasoning live in
 [`DEC-RIC-009`](../decisions/DEC-RIC-009-governed-branch-protection.md); this
 guide is the practical "what does this mean when I work" companion.
 
-## What is enforced
+> **Activation state: `APPROVED TARGET / NOT YET ACTIVATED`.**
+> At the time this guide is written no ruleset exists — `GET /rulesets` returns
+> `[]`, `GET /rules/branches/main` returns `[]`, and `main` reports
+> `protected: false`. Everything below describes what **will** be true once the
+> staged activation completes and is proven by read-back. Verify the live state
+> with the read-only commands under [Verifying the live policy](#verifying-the-live-policy)
+> before relying on any statement here.
 
-`main` is governed by a single repository ruleset named `governed-main`,
+## What will be enforced
+
+`main` will be governed by a single repository ruleset named `governed-main`,
 targeting the default branch, with `enforcement: active` and **no bypass
-actors** — the rules apply to everyone, including the repository owner.
+actors** — the rules will apply to everyone, including the repository owner.
 
-| Rule | What it means day to day |
+| Rule | What it will mean day to day |
 |---|---|
 | `deletion` | `main` cannot be deleted. |
 | `non_fast_forward` | `main` cannot be force-pushed. |
@@ -29,8 +37,16 @@ Pull-request parameters:
 | `require_last_push_approval` | `false` |
 | `allowed_merge_methods` | `["squash"]` |
 
-Repository merge settings: squash only. Merge commits and rebase merges are
-disabled. Merged branches are **not** auto-deleted — task branches are retained.
+Required-status-check parameters:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `strict_required_status_checks_policy` | `false` | Your branch does **not** have to be up to date with `main` before merging. With a single serial writer, requiring it would force a rebase-and-rerun loop for no safety gain. |
+| `do_not_enforce_on_create` | `false` | The check is enforced on branch creation too. |
+
+Repository merge settings will be narrowed to squash only. Merge commits and
+rebase merges will be disabled. Merged branches are **not** auto-deleted — task
+branches are retained.
 
 ## Working under it
 
@@ -43,9 +59,15 @@ Nothing changes about the normal flow, because the flow was already this:
    thread blocks the merge even though no approval is required.
 5. Squash-merge.
 
-What will now fail that previously succeeded: `git push origin main`,
+What will fail once activated, that previously succeeded: `git push origin main`,
 `git push --force origin main`, deleting `main`, and merging a PR whose
 `Validate` has not passed or that has an unresolved review thread.
+
+This also makes the conditional direct-commit-to-`main` pattern described in
+[`sprint-0-developer-handoff.md`](../handoffs/sprint-0-developer-handoff.md) §8
+structurally unavailable. Branch-per-task was already the default, so no
+approved mandate is contradicted, but a future contract purporting to authorise
+a direct `main` commit could not be satisfied without an explicit break-glass.
 
 ## Zero required approvals is not "no review"
 
@@ -77,7 +99,7 @@ part of the governance contract, not a cosmetic label.
 Note that `ci.yml` runs on `push` only for `[main, feat/**, fix/**, chore/**]`.
 A branch outside those globs (for example `docs/**`) gets no pre-PR push run,
 but a PR into `main` always triggers the `pull_request` run, so the required
-check is always produced. Closing that trigger gap is tracked separately.
+check is always produced. Closing that trigger gap is to be tracked separately.
 
 ## Verifying the live policy
 
@@ -86,7 +108,7 @@ All read-only:
 ```bash
 # The ruleset as stored
 gh api repos/devricardo90/rick-control-center/rulesets
-gh api repos/devricardo90/rick-control-center/rulesets/{id}
+gh api repos/devricardo90/rick-control-center/rulesets/"$RULESET_ID"
 
 # The rules EFFECTIVELY applied to main — this is the one that proves enforcement
 gh api repos/devricardo90/rick-control-center/rules/branches/main
@@ -107,37 +129,106 @@ the configuration exists, it targets `main`, and its rules are active on `main`.
 the configuration were wrong, the probe would cause exactly the damage the
 control exists to prevent. Verification is read-only.
 
-## Break-glass
+## Resolving the ruleset id
 
-There is no standing bypass. If protection must be relaxed — a ruleset
-misconfiguration blocking all delivery, or a security fix while CI is down:
+Every command below needs the ruleset id. Resolve it deterministically by name
+rather than hardcoding it — read-only:
 
 ```bash
-gh api -X PATCH repos/devricardo90/rick-control-center/rulesets/{id} \
-  -f enforcement=disabled
-# ... perform the minimum necessary action ...
-gh api -X PATCH repos/devricardo90/rick-control-center/rulesets/{id} \
-  -f enforcement=active
+RULESET_ID=$(gh api repos/devricardo90/rick-control-center/rulesets \
+  --jq '.[] | select(.name=="governed-main") | .id')
+echo "$RULESET_ID"
 ```
 
-This is deliberately a visible state change rather than a silent per-merge
-bypass. Record every use on NDERCC-22 with actor, UTC timestamp, SHA, reason and
+If that prints nothing, the ruleset does not exist and nothing below applies.
+
+## Changing enforcement state — `PUT`, never `PATCH`
+
+The repository-rulesets API exposes `GET`, `POST` on the collection and `GET`,
+**`PUT`**, `DELETE` on an individual ruleset. **There is no `PATCH` method.**
+
+`PUT` has **replacement** semantics. A partial body such as
+`-f enforcement=disabled` would silently drop every rule, condition and bypass
+setting it omits — turning an intended enforcement change into an accidental
+teardown of the entire policy. Always send the **complete** intended payload.
+
+The safe procedure is read the current ruleset, change only `enforcement`, send
+it back whole:
+
+```bash
+RULESET_ID=$(gh api repos/devricardo90/rick-control-center/rulesets \
+  --jq '.[] | select(.name=="governed-main") | .id')
+
+# 1. Capture the complete current ruleset (keep this file — it is the restore point)
+gh api repos/devricardo90/rick-control-center/rulesets/"$RULESET_ID" \
+  > governed-main.backup.json
+
+# 2. Build a full payload that differs only in enforcement.
+#    Only the writable fields are sent; server-managed fields such as id,
+#    source, created_at and _links must not be echoed back.
+jq '{name, target, enforcement: "disabled", bypass_actors, conditions, rules}' \
+  governed-main.backup.json > governed-main.disabled.json
+
+# 3. Replace the ruleset with that complete payload
+gh api -X PUT repos/devricardo90/rick-control-center/rulesets/"$RULESET_ID" \
+  --input governed-main.disabled.json
+
+# 4. Restore by sending the captured payload back with enforcement active
+jq '{name, target, enforcement: "active", bypass_actors, conditions, rules}' \
+  governed-main.backup.json > governed-main.active.json
+gh api -X PUT repos/devricardo90/rick-control-center/rulesets/"$RULESET_ID" \
+  --input governed-main.active.json
+```
+
+After any such change, re-verify with `rules/branches/main` — confirm the rules
+are active on `main` again, not merely that the payload was accepted.
+
+## Break-glass
+
+There is no standing bypass. Relaxing protection is a deliberate, visible state
+change rather than a silent per-merge bypass, and is justified only by:
+
+- a ruleset misconfiguration blocking all delivery; or
+- a security fix that must land while CI is unavailable.
+
+Use the `PUT`-with-complete-payload procedure above to set `enforcement` to
+`disabled`, perform the minimum necessary action, then restore `active`
+immediately.
+
+Record every use on NDERCC-22 with actor, UTC timestamp, SHA, reason and
 remediation, **before** the next unrelated merge.
 
-## Rollback
+## Rollback — prepared, not exercised
+
+Rollback is documented so it is ready if it is ever genuinely needed. It is
+**not** a validation step:
+
+- rollback is **prepared, not exercised**;
+- the ruleset must **never** be intentionally disabled merely to demonstrate
+  that rollback works;
+- rollback is executed **only** if genuinely required during failure recovery;
+- normal validation after activation is **read-only** — the commands under
+  [Verifying the live policy](#verifying-the-live-policy), nothing more.
+
+Deliberately disabling protection to prove a procedure would create an
+artificial unprotected window on `main` — the exact exposure the policy exists
+to remove.
 
 Recovery never depends on a bypass actor: repository admins retain ruleset
 administration regardless of `bypass_actors`.
 
 ```bash
-# Instant, non-destructive
-gh api -X PATCH repos/devricardo90/rick-control-center/rulesets/{id} -f enforcement=disabled
+RULESET_ID=$(gh api repos/devricardo90/rick-control-center/rulesets \
+  --jq '.[] | select(.name=="governed-main") | .id')
 
 # Full removal, restoring the pre-NDERCC-22 policy
-gh api -X DELETE repos/devricardo90/rick-control-center/rulesets/{id}
+gh api -X DELETE repos/devricardo90/rick-control-center/rulesets/"$RULESET_ID"
 gh api -X PATCH repos/devricardo90/rick-control-center \
   -F allow_merge_commit=true -F allow_rebase_merge=true
 ```
+
+Note that the repository-settings endpoint genuinely is `PATCH` — only the
+rulesets endpoints are `PUT`-only.
 
 No branch, commit, or history is touched by this policy, so rollback cannot lose
 work.
