@@ -105,6 +105,7 @@ export {
   validateSpecStatements,
 } from './implementation-spec.js'
 export type {
+  CanonicalSpecInput,
   ImplementationSpecContent,
   ImplementationSpecContentInput,
   ImplementationSpecStatus as ImplementationSpecStatusType,

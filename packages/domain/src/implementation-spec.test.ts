@@ -254,13 +254,22 @@ describe('deterministic specification validation', () => {
 })
 
 describe('canonical content serialization', () => {
+  /** A rule-set version that is deliberately not the installed one, standing in for a specification authored under earlier rules. */
+  const HISTORICAL_RULES = 'P1_038_V0'
+  /** A rule-set version standing in for a future bump, so a test can prove an old specification is unaffected by one. */
+  const FUTURE_RULES = 'P1_038_V2'
+
+  function canonical(rulesVersion: string, overrides: Partial<ImplementationSpecContentInput> = {}): string {
+    return canonicalSpecContent({ rulesVersion, content: parsedContent(overrides) })
+  }
+
   it('is stable across separately constructed but identical content', () => {
-    expect(canonicalSpecContent(parsedContent())).toBe(canonicalSpecContent(parsedContent()))
+    expect(canonical(SPEC_LIFECYCLE_VERSION)).toBe(canonical(SPEC_LIFECYCLE_VERSION))
   })
 
   it('changes when any content field changes', () => {
-    expect(canonicalSpecContent(parsedContent())).not.toBe(
-      canonicalSpecContent(parsedContent({ risks: ['a newly recorded risk'] })),
+    expect(canonical(SPEC_LIFECYCLE_VERSION)).not.toBe(
+      canonical(SPEC_LIFECYCLE_VERSION, { risks: ['a newly recorded risk'] }),
     )
   })
 
@@ -278,16 +287,53 @@ describe('canonical content serialization', () => {
       behavior: 'A specification must be approved before a contract may be derived from it.',
       title: 'Governed SDD specification lifecycle',
     })
+    const rulesVersion = SPEC_LIFECYCLE_VERSION
 
-    expect(straight.ok && reordered.ok && canonicalSpecContent(straight.value)).toBe(
-      straight.ok && reordered.ok && canonicalSpecContent(reordered.value),
+    expect(straight.ok && reordered.ok && canonicalSpecContent({ rulesVersion, content: straight.value })).toBe(
+      straight.ok && reordered.ok && canonicalSpecContent({ rulesVersion, content: reordered.value }),
     )
   })
 
   it('distinguishes statement order, because a specification is an ordered document', () => {
-    expect(canonicalSpecContent(parsedContent({ scope: ['a', 'b'] }))).not.toBe(
-      canonicalSpecContent(parsedContent({ scope: ['b', 'a'] })),
+    expect(canonical(SPEC_LIFECYCLE_VERSION, { scope: ['a', 'b'] })).not.toBe(
+      canonical(SPEC_LIFECYCLE_VERSION, { scope: ['b', 'a'] }),
     )
+  })
+
+  // ── Historical hash determinism ────────────────────────────────────────────
+
+  it('takes the rule-set version from its argument, never from module scope', () => {
+    // The serialised form names the version it was given. If the function
+    // read SPEC_LIFECYCLE_VERSION internally, this could not hold.
+    expect(canonical(HISTORICAL_RULES)).toContain(HISTORICAL_RULES)
+    expect(canonical(HISTORICAL_RULES)).not.toContain(SPEC_LIFECYCLE_VERSION)
+  })
+
+  it('gives the same result for the same content under the same rule set, every time', () => {
+    expect(canonical(HISTORICAL_RULES)).toBe(canonical(HISTORICAL_RULES))
+    expect(canonical(FUTURE_RULES)).toBe(canonical(FUTURE_RULES))
+  })
+
+  it('does not collapse identical bodies interpreted under different rule sets', () => {
+    // Two specifications whose words match but whose governing rules differ
+    // are not the same canonical specification: the rules decide what the
+    // words mean.
+    expect(canonical(HISTORICAL_RULES)).not.toBe(canonical(SPEC_LIFECYCLE_VERSION))
+    expect(canonical(SPEC_LIFECYCLE_VERSION)).not.toBe(canonical(FUTURE_RULES))
+  })
+
+  it('leaves an older rule set untouched when a newer one exists', () => {
+    // The defect this replaces: recomputing an old specification once the
+    // installed version had moved on produced a different canonical form.
+    // With the version supplied explicitly, the old serialisation is a
+    // function of the old inputs alone and cannot move.
+    const before = canonical(HISTORICAL_RULES)
+
+    // Serialising under newer rule sets in between must change nothing.
+    canonical(SPEC_LIFECYCLE_VERSION)
+    canonical(FUTURE_RULES)
+
+    expect(canonical(HISTORICAL_RULES)).toBe(before)
   })
 })
 

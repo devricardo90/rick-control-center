@@ -40,7 +40,19 @@ import type { Result } from '@rick/shared'
 import { normalizeBacklogCode } from './operational-backlog.js'
 import { DecisionStatus, RequirementStatus } from './strategic-truth.js'
 
-/** Bumped whenever a validation or eligibility rule below changes, so a reported verdict always names the rule set that produced it. */
+/**
+ * The rule set currently installed. Bumped whenever a validation, content or
+ * eligibility rule below changes, so a reported verdict always names the rule
+ * set that produced it.
+ *
+ * This is the version that newly authored content is written under. It is
+ * **not** the version an already persisted specification is interpreted
+ * under: every stored specification carries its own `rulesVersion`, and
+ * anything recomputed from a stored body — above all its canonical form and
+ * content hash — must use that persisted value. Reading this constant during
+ * recomputation would let a future bump silently rewrite the canonical
+ * identity of specifications that were approved long before it.
+ */
 export const SPEC_LIFECYCLE_VERSION = 'P1_038_V1' as const
 
 /** Failure reasons are plain strings; the persistence layer wraps them in typed errors. */
@@ -450,24 +462,51 @@ export function validateImplementationSpec(content: ImplementationSpecContent): 
 // ── Canonical serialisation for content hashing ───────────────────────────────
 
 /**
- * A stable, fully ordered serialisation of specification content.
+ * One specification body together with the rule set it is to be interpreted
+ * under.
+ *
+ * `rulesVersion` is an explicit input rather than the module-level
+ * `SPEC_LIFECYCLE_VERSION`, and that is the whole point of this type. A
+ * persisted specification carries the rules version it was authored under;
+ * recomputing its canonical form must use *that* value, never whichever
+ * version happens to be installed today. Reading the current version from
+ * module scope would let a future rule-version bump silently rewrite the
+ * canonical identity of every specification already in the database.
+ */
+export interface CanonicalSpecInput {
+  /** The rule set this body is interpreted under — for a stored specification, its persisted `rulesVersion`. */
+  readonly rulesVersion: string
+  readonly content: ImplementationSpecContent
+}
+
+/**
+ * A stable, fully ordered serialisation of specification content under a
+ * named rule set.
  *
  * The digest itself is computed by `@rick/database`, which owns the hashing
  * primitive; the domain owns only *what* is hashed, so the two can never
  * disagree about the byte sequence. Keys are emitted in a fixed literal
- * order, so the output depends on content alone.
+ * order, so the output depends on the input alone — no clock, no globals.
+ *
+ * `rulesVersion` is deliberately part of the serialised form. Two otherwise
+ * identical bodies interpreted under different content rules are not the
+ * same canonical specification and must not collapse to one identity: the
+ * rules decide what the body *means*, so the same words under different
+ * rules are a different specification.
  *
  * This describes *what a specification says*, not *which specification it
  * is* — identity is `(projectId, code, version)`. Two revisions whose bodies
- * are identical therefore share a hash, which is exactly the signal that a
- * revision changed nothing.
+ * and rule versions are identical therefore share a hash, which is exactly
+ * the signal that a revision changed nothing.
  *
  * It is not, and must not be mistaken for, an Execution Contract hash
  * (P0-043).
  */
-export function canonicalSpecContent(content: ImplementationSpecContent): string {
+export function canonicalSpecContent(input: CanonicalSpecInput): string {
+  const { content } = input
+
   return JSON.stringify({
-    rulesVersion: SPEC_LIFECYCLE_VERSION,
+    rulesVersion: input.rulesVersion,
     title: content.title,
     behavior: content.behavior,
     scope: content.scope,

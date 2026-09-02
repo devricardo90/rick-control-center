@@ -51,12 +51,48 @@ for its whole life, and letting a revision move would silently transfer
 authority.
 
 `contentHash` is the SHA-256 of a canonical serialization of the content
-columns, recomputed by the persistence layer on every write and never accepted
+columns **together with the rule set that specification is interpreted
+under**, recomputed by the persistence layer on every write and never accepted
 from a caller — the `DocumentSnapshot` rule applied here. It identifies *what a
 specification says*; `(projectId, code, version)` identifies *which
-specification it is*. Two revisions with identical bodies therefore share a
-hash, which is precisely the signal that a revision changed nothing. **It is
-not an Execution Contract hash and does not implement P0-043.**
+specification it is*. Two revisions with identical bodies **under the same
+rules version** therefore share a hash, which is precisely the signal that a
+revision changed nothing. **It is not an Execution Contract hash and does not
+implement P0-043.**
+
+### The rules version is part of the hash, and it is the specification's own
+
+Every row stores the `rulesVersion` it was authored under, and the canonical
+serialization takes that version as an **explicit input** rather than reading
+the installed `SPEC_LIFECYCLE_VERSION` from module scope.
+
+Both halves of that matter, for different reasons:
+
+- **Including the rules version** keeps two otherwise identical bodies from
+  collapsing to one canonical identity when the rules that govern them differ.
+  The rules decide what the words *mean*, so the same words under different
+  content rules are not the same specification.
+- **Taking it as an argument** is what keeps history stable. Reading the
+  installed constant during recomputation would mean that bumping
+  `SPEC_LIFECYCLE_VERSION` silently rewrote the canonical identity of every
+  specification already approved under earlier rules — including ones a later
+  Execution Contract had already been derived against. Recomputation therefore
+  always uses the row's persisted `rulesVersion`
+  (`recomputeImplementationSpecContentHash`), never today's.
+
+`rulesVersion` and `contentHash` are written together in the same statement as
+the body, so a row can never hold a hash that disagrees with its own rules
+version. Content is only ever *authored* — on creation, revision, or a draft
+edit — and authoring always uses the installed rule set; there is deliberately
+no path that rewrites a stored body under a different one.
+
+Two related questions are kept apart on purpose. "What did this specification
+say, under its own rules?" is the hash, and it is fixed for the life of the
+row. "Would this specification still pass validation today?" is the
+`INVALID_CONTENT` eligibility signal, and it is deliberately evaluated under
+the *current* rules — a specification that no longer satisfies the rules in
+force must stop being derivable from, without its historical identity
+changing.
 
 ## Content model
 
@@ -135,16 +171,51 @@ truth is created and a cross-project link cannot be inserted at all. Jira
 traceability is inherited from the bound Task's existing external provenance —
 this decision introduces no new Jira surface and authorizes no Jira API call.
 
-`resolveImplementationSpecExecutionEligibility` is the deterministic predicate
-RIC-E07A's exit criterion calls for. It returns `ELIGIBLE`, or every applicable
-reason among `MISSING`, `NOT_APPROVED`, `SUPERSEDED`, `INVALID_CONTENT` and
-`STALE_STRATEGIC_TRUTH` — a specification is stale when a linked requirement is
-no longer `ACTIVE` or a linked decision is no longer `APPROVED`. Like the
-validation verdict, it is **computed on every call and never persisted**.
+Eligibility is the deterministic predicate RIC-E07A's exit criterion calls for.
+It returns `ELIGIBLE`, or every applicable reason among `MISSING`,
+`NOT_APPROVED`, `SUPERSEDED`, `INVALID_CONTENT` and `STALE_STRATEGIC_TRUTH` — a
+specification is stale when a linked requirement is no longer `ACTIVE` or a
+linked decision is no longer `APPROVED`. Like the validation verdict, it is
+**computed on every call and never persisted**.
 
-P1-038 states this predicate and stops there. The later Execution Contract
-generator (P0-041) is what must consult it; there is no contract to block yet,
-and this decision does not create one.
+### Eligibility is computed from one consistent state
+
+A verdict is assembled from facts in four tables: which specification governs
+the Task, its traceability links, and the statuses of the requirements and
+decisions those links point at. Read independently they can describe a state
+that never existed — an approved specification paired with strategic truth that
+was only superseded after that specification had already been retired.
+
+Eligibility therefore runs inside a transaction holding the owning project's
+row lock. That is the existing RCC concurrency pattern, not a new one: every
+writer that can move any of those facts already takes the same lock — the
+specification lifecycle and traceability writes in `implementation-spec.ts`,
+and the requirement and decision writes in `strategic-truth.ts`. While it is
+held, none of them can commit, so every fact in one verdict belongs to one
+state. `withConsistentProjectReadTransaction` is the read-only counterpart of
+`withMutableProjectTransaction`, sharing its single lock implementation and
+differing only in that it does not apply the archived-project write rule,
+because reads remain permitted for archived projects.
+
+### The surface is shaped so authority cannot be granted on a stale verdict
+
+Two entry points exist, and the distinction between them is the whole point:
+
+- `resolveImplementationSpecEligibilityInTransaction(tx, …)` computes the
+  verdict inside a transaction the caller already owns. **This is the gate.**
+- `resolveImplementationSpecExecutionEligibility(client, …)` wraps it in a
+  consistent read for display and reporting. **This is a projection**, accurate
+  for the instant it committed and possibly stale by the time it is read.
+
+An answer is only as good as the transaction it was computed in. A caller that
+obtained `ELIGIBLE` from the projection and then opened a *second* transaction
+to create authority would have reintroduced exactly the gap the consistent read
+closes, one layer up. P0-041 must therefore call the transaction-scoped
+resolver inside the same `withMutableProjectTransaction` that persists the
+contract, so the check and the write commit together or not at all.
+
+P1-038 states this predicate and provides that primitive, and stops there. It
+creates no contract, and there is no contract to block yet.
 
 ## Persistence
 

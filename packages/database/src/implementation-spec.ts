@@ -86,7 +86,11 @@ import {
   InvalidImplementationSpecTransitionError,
   TaskNotFoundError,
 } from './errors.js'
-import { requireExistingProject, withMutableProjectTransaction } from './internal/mutable-project-transaction.js'
+import {
+  requireExistingProject,
+  withConsistentProjectReadTransaction,
+  withMutableProjectTransaction,
+} from './internal/mutable-project-transaction.js'
 
 export type { ImplementationSpec }
 
@@ -130,9 +134,41 @@ export function readImplementationSpecContent(spec: ImplementationSpec): SpecVal
   return parseImplementationSpecContent(storedContentInput(spec))
 }
 
-/** SHA-256 over the domain's canonical serialization. The domain owns *what* is hashed; this owns the primitive, so the two cannot disagree about the bytes. */
-function computeContentHash(content: ImplementationSpecContent): string {
-  return createHash('sha256').update(Buffer.from(canonicalSpecContent(content), 'utf8')).digest('hex')
+/**
+ * SHA-256 over the domain's canonical serialization. The domain owns *what*
+ * is hashed; this owns the primitive, so the two cannot disagree about the
+ * bytes.
+ *
+ * `rulesVersion` is a required argument rather than a module constant read
+ * inside: recomputing a stored specification's hash must use the version
+ * that specification was authored under, so a later rule-version bump can
+ * never rewrite the canonical identity of a specification already approved
+ * under earlier rules.
+ */
+function computeContentHash(content: ImplementationSpecContent, rulesVersion: string): string {
+  const canonical = canonicalSpecContent({ rulesVersion, content })
+
+  return createHash('sha256').update(Buffer.from(canonical, 'utf8')).digest('hex')
+}
+
+/**
+ * Recomputes a stored specification's content hash from its own persisted
+ * body and its own persisted `rulesVersion`.
+ *
+ * For an untampered row this always reproduces `spec.contentHash`, for the
+ * whole life of the row — including after `SPEC_LIFECYCLE_VERSION` has moved
+ * on. Returns a failure rather than throwing when the stored body is not
+ * narrowable, so a caller checking integrity can report that instead of
+ * crashing.
+ */
+export function recomputeImplementationSpecContentHash(spec: ImplementationSpec): SpecValidation<string> {
+  const content = readImplementationSpecContent(spec)
+
+  if (!content.ok) {
+    return content
+  }
+
+  return { ok: true, value: computeContentHash(content.value, spec.rulesVersion) }
 }
 
 /** The content half of a create or update payload, with the hash and rule-set version derived rather than accepted. */
@@ -151,6 +187,18 @@ interface SpecContentColumns {
   rulesVersion: string
 }
 
+/**
+ * Content is only ever written as newly authored content, so it is written
+ * under the currently installed rule set. `rulesVersion` and `contentHash`
+ * are produced together from that one value and move in the same statement
+ * as the body, so a row can never hold a hash that disagrees with its own
+ * rules version — which is what makes recomputation from the persisted
+ * `rulesVersion` reliable for the rest of the row's life.
+ *
+ * There is deliberately no path that writes content under any other rule
+ * set: rewriting a stored body under today's rules would be exactly the
+ * silent historical rewrite this design exists to prevent.
+ */
 function contentColumns(content: ImplementationSpecContent): SpecContentColumns {
   return {
     title: content.title,
@@ -163,7 +211,7 @@ function contentColumns(content: ImplementationSpecContent): SpecContentColumns 
     risksJson: [...content.risks],
     interfacesJson: [...content.interfaces],
     validationStrategyJson: [...content.validationStrategy],
-    contentHash: computeContentHash(content),
+    contentHash: computeContentHash(content, SPEC_LIFECYCLE_VERSION),
     rulesVersion: SPEC_LIFECYCLE_VERSION,
   }
 }
@@ -749,11 +797,11 @@ export async function listImplementationSpecDecisionIds(
  * bare "missing" for a Task that has drafts sitting in front of it.
  */
 async function findGoverningSpecForTask(
-  client: PrismaClient,
+  tx: Prisma.TransactionClient,
   projectId: string,
   taskId: string,
 ): Promise<ImplementationSpec | null> {
-  const approved = await client.implementationSpec.findFirst({
+  const approved = await tx.implementationSpec.findFirst({
     where: { projectId, taskId, status: ImplementationSpecStatus.APPROVED },
   })
 
@@ -761,7 +809,7 @@ async function findGoverningSpecForTask(
     return approved
   }
 
-  return client.implementationSpec.findFirst({
+  return tx.implementationSpec.findFirst({
     where: { projectId, taskId },
     orderBy: [...LINEAGE_NEWEST_FIRST, { code: 'asc' }, { id: 'asc' }],
   })
@@ -769,22 +817,39 @@ async function findGoverningSpecForTask(
 
 /**
  * Whether a Task currently has a specification an Execution Contract could
- * legitimately be derived from, and every reason it does not.
+ * legitimately be derived from, and every reason it does not — **computed
+ * inside the caller's transaction**.
  *
- * This is the deterministic gate RIC-E07A's exit criterion calls for. It is
- * computed on every call and never persisted, so it can never disagree with
- * the specification and strategic truth it describes. P1-038 states the
- * predicate and stops there: the later Execution Contract generator
- * (P0-041) is what must consult it, and no contract exists to block yet.
+ * This is the deterministic gate RIC-E07A's exit criterion calls for, and it
+ * is the primitive a later Execution Contract generator (P0-041) must use.
+ * An eligibility answer is only as good as the transaction it was computed
+ * in: the specification's status, its traceability links and the strategic
+ * truth those links point at are four separate reads, and a verdict that
+ * mixed a pre-change specification with post-change links would describe a
+ * state that never existed.
+ *
+ * The caller must therefore already hold the owning project's row lock —
+ * `withMutableProjectTransaction` for a transaction that will also write, or
+ * `withConsistentProjectReadTransaction` for a pure projection. Every writer
+ * that can move any fact read here takes that same lock: specification
+ * lifecycle and traceability writes in this module, and requirement and
+ * decision writes in `strategic-truth.ts`. While it is held, none of them
+ * can commit, so all four reads below belong to one state.
+ *
+ * **This is the call P0-041 must make, and it must make it inside the same
+ * transaction that persists the contract.** Deriving authority means
+ * re-checking eligibility and writing the contract atomically; obtaining
+ * `ELIGIBLE` from the projection below and then opening a *second*
+ * transaction to create authority would reintroduce exactly the gap this
+ * signature exists to close. Nothing here creates, validates or hashes a
+ * contract — P0-040 through P0-043 remain unimplemented.
  */
-export async function resolveImplementationSpecExecutionEligibility(
-  client: PrismaClient,
+export async function resolveImplementationSpecEligibilityInTransaction(
+  tx: Prisma.TransactionClient,
   projectId: string,
   taskId: string,
 ): Promise<SpecEligibilityOutcome> {
-  await requireExistingProject(client, projectId)
-
-  const spec = await findGoverningSpecForTask(client, projectId, taskId)
+  const spec = await findGoverningSpecForTask(tx, projectId, taskId)
 
   if (spec === null) {
     return evaluateSpecExecutionEligibility({ spec: null, linkedRequirements: [], linkedDecisions: [] })
@@ -793,12 +858,12 @@ export async function resolveImplementationSpecExecutionEligibility(
   const content = readImplementationSpecContent(spec)
   const contentValid = content.ok && validateImplementationSpec(content.value).valid
 
-  const requirementLinks = await client.implementationSpecRequirement.findMany({
+  const requirementLinks = await tx.implementationSpecRequirement.findMany({
     where: { projectId, specId: spec.id },
     select: { requirement: { select: { id: true, status: true } } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
-  const decisionLinks = await client.implementationSpecDecision.findMany({
+  const decisionLinks = await tx.implementationSpecDecision.findMany({
     where: { projectId, specId: spec.id },
     select: { decision: { select: { id: true, status: true } } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -809,4 +874,28 @@ export async function resolveImplementationSpecExecutionEligibility(
     linkedRequirements: requirementLinks.map(link => link.requirement),
     linkedDecisions: decisionLinks.map(link => link.decision),
   })
+}
+
+/**
+ * The read-only projection of the same question, for display and reporting.
+ *
+ * It runs the transaction-scoped resolver above inside a consistent-read
+ * transaction that holds the project row lock, so the answer describes one
+ * real state rather than a blend of several. Reads remain permitted for an
+ * archived project, as everywhere else in this package.
+ *
+ * **This is a projection, not a gate.** The verdict is accurate for the
+ * instant the transaction committed and may be stale by the time the caller
+ * reads it. Anything that grants authority on the strength of an eligibility
+ * answer must call `resolveImplementationSpecEligibilityInTransaction`
+ * inside its own writing transaction instead, so the check and the write
+ * cannot be separated.
+ */
+export async function resolveImplementationSpecExecutionEligibility(
+  client: PrismaClient,
+  projectId: string,
+  taskId: string,
+): Promise<SpecEligibilityOutcome> {
+  return withConsistentProjectReadTransaction(client, projectId, async tx =>
+    resolveImplementationSpecEligibilityInTransaction(tx, projectId, taskId))
 }

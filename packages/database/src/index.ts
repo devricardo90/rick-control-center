@@ -243,7 +243,13 @@ export {
   listImplementationSpecsForProject,
   listImplementationSpecsForTask,
   readImplementationSpecContent,
+  recomputeImplementationSpecContentHash,
   rejectImplementationSpec,
+  // The transaction-scoped resolver is the gate; the plain
+  // `resolve…ExecutionEligibility` is a read-only projection. A caller that
+  // grants authority on an eligibility answer must use the former inside its
+  // own writing transaction, so the check and the write cannot be separated.
+  resolveImplementationSpecEligibilityInTransaction,
   resolveImplementationSpecExecutionEligibility,
   reviseImplementationSpec,
   updateImplementationSpecDraft,
@@ -286,6 +292,7 @@ export {
   validateImplementationSpec,
 } from '@rick/domain'
 export type {
+  CanonicalSpecInput,
   ImplementationSpecContent,
   ImplementationSpecContentInput,
   SpecEligibilityFinding,

@@ -50,7 +50,11 @@ function isProjectLockRowArray(value: unknown): value is ProjectLockRow[] {
  * mutation can never observe a stale pre-archival status and commit after
  * the project has already been serialized as ARCHIVED.
  */
-async function lockMutableProject(tx: Prisma.TransactionClient, projectId: string): Promise<void> {
+async function lockProject(
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  requireMutable: boolean,
+): Promise<void> {
   const raw: unknown = await tx.$queryRaw`SELECT id, status FROM projects WHERE id = ${projectId}::uuid FOR UPDATE`
 
   if (!isProjectLockRowArray(raw)) {
@@ -61,15 +65,15 @@ async function lockMutableProject(tx: Prisma.TransactionClient, projectId: strin
   if (!row) {
     throw new ProjectNotFoundError(projectId)
   }
-  if (row.status === 'ARCHIVED') {
+  if (requireMutable && row.status === 'ARCHIVED') {
     throw new ArchivedProjectReadOnlyError(projectId)
   }
 }
 
 /**
  * Locks and validates the owning project, then runs `run` inside the same
- * transaction. Every strategic-document mutation goes through this single
- * implementation so all of them receive identical protection.
+ * transaction. Every strategic-document and backlog mutation goes through
+ * this single implementation so all of them receive identical protection.
  */
 export async function withMutableProjectTransaction<T>(
   client: PrismaClient,
@@ -77,7 +81,40 @@ export async function withMutableProjectTransaction<T>(
   run: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
   return client.$transaction(async (tx) => {
-    await lockMutableProject(tx, projectId)
+    await lockProject(tx, projectId, true)
+    return run(tx)
+  })
+}
+
+/**
+ * The read-only counterpart: takes the same project row lock, then runs
+ * `run` inside the same transaction — but does **not** reject an archived
+ * project, because reads remain allowed for archived projects everywhere
+ * else in this package.
+ *
+ * This exists for a projection that must be computed from *one consistent
+ * state* rather than from several independently-timed reads. Holding the
+ * same row lock every writer takes is what provides that: no mutation of
+ * this project's aggregates can commit between the first statement and the
+ * last, so every fact the projection reads belongs to a single state.
+ *
+ * It is the same lock and the same query as the mutable envelope above, on
+ * purpose — a second implementation of the same primitive could drift from
+ * this one and quietly stop excluding the writers it is supposed to
+ * exclude.
+ *
+ * Internal to @rick/database — deliberately not re-exported from
+ * src/index.ts.
+ *
+ * NDERCC-23: consistent-read envelope for specification eligibility.
+ */
+export async function withConsistentProjectReadTransaction<T>(
+  client: PrismaClient,
+  projectId: string,
+  run: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return client.$transaction(async (tx) => {
+    await lockProject(tx, projectId, false)
     return run(tx)
   })
 }

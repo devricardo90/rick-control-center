@@ -24,8 +24,8 @@
  * NDERCC-23 / DEC-RIC-010: governed SDD specification lifecycle (P1-038).
  */
 import { createHash } from 'node:crypto'
-import type { PrismaClient, Project, Task } from '@prisma/client'
-import { afterAll, describe, expect, it } from 'vitest'
+import type { ImplementationSpec, Prisma, PrismaClient, Project, Task } from '@prisma/client'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   canonicalSpecContent,
   ImplementationSpecStatus,
@@ -33,7 +33,11 @@ import {
   SpecEligibilityReason,
   SpecValidationCode,
 } from '@rick/domain'
-import type { ImplementationSpecContentInput } from '@rick/domain'
+import type {
+  ImplementationSpecContent,
+  ImplementationSpecContentInput,
+  SpecEligibilityOutcome,
+} from '@rick/domain'
 import { recordDocumentSnapshotSync } from './document-snapshot.js'
 import { createDocumentSource } from './document-source.js'
 import {
@@ -62,6 +66,7 @@ import {
   listImplementationSpecRequirementIds,
   listImplementationSpecsForTask,
   readImplementationSpecContent,
+  recomputeImplementationSpecContentHash,
   rejectImplementationSpec,
   resolveImplementationSpecExecutionEligibility,
   reviseImplementationSpec,
@@ -77,8 +82,22 @@ import { createTestClient, uniqueSlug } from './test-support.js'
 
 const client: PrismaClient = createTestClient()
 
+/**
+ * A second client, with its own connection pool, used only by the
+ * concurrency suite at the end of this file.
+ *
+ * It is genuinely required rather than tidy: Prisma serializes interactive
+ * transactions issued through one client, so a "concurrent" reader on
+ * `client` would simply queue behind the writer and never reach PostgreSQL
+ * at all. Tests written that way pass whatever the implementation does,
+ * because the ordering they observe comes from the driver rather than from
+ * the database. A separate pool is also the truer model of the situation
+ * being tested: two independent callers.
+ */
+const concurrentClient: PrismaClient = createTestClient()
+
 afterAll(async () => {
-  await client.$disconnect()
+  await Promise.all([client.$disconnect(), concurrentClient.$disconnect()])
 })
 
 const UNKNOWN_UUID = '00000000-0000-4000-8000-000000000000'
@@ -213,13 +232,8 @@ describe('specification creation', () => {
       supersedesSpecId: null,
     })
 
-    const stored = readImplementationSpecContent(spec)
-    expect(stored.ok).toBe(true)
-    expect(stored.ok && spec.contentHash).toBe(
-      createHash('sha256')
-        .update(Buffer.from(stored.ok ? canonicalSpecContent(stored.value) : '', 'utf8'))
-        .digest('hex'),
-    )
+    expect(spec.rulesVersion).toBe(SPEC_LIFECYCLE_VERSION)
+    expect(recomputeImplementationSpecContentHash(spec)).toEqual({ ok: true, value: spec.contentHash })
   })
 
   it('accepts an incomplete draft — approvability is decided at approval time', async () => {
@@ -391,6 +405,135 @@ describe('specification versioning', () => {
         rulesVersion: first.rulesVersion,
       },
     })).rejects.toThrow()
+  })
+})
+
+// ── Historical content-hash determinism ───────────────────────────────────────
+
+describe('historical content-hash determinism', () => {
+  /** Stands in for a rule set an older specification was authored under. Deliberately not the installed version. */
+  const HISTORICAL_RULES = 'P1_038_V0'
+
+  function requireContent(spec: ImplementationSpec): ImplementationSpecContent {
+    const content = readImplementationSpecContent(spec)
+
+    if (!content.ok) {
+      throw new Error(`stored specification content is not narrowable: ${content.error}`)
+    }
+
+    return content.value
+  }
+
+  function hashUnder(rulesVersion: string, content: ImplementationSpecContent): string {
+    return createHash('sha256')
+      .update(Buffer.from(canonicalSpecContent({ rulesVersion, content }), 'utf8'))
+      .digest('hex')
+  }
+
+  /**
+   * Rewrites a row to look as though it had been authored under an earlier
+   * rule set — `rulesVersion` and `contentHash` together, so the row stays
+   * internally consistent. Only a direct write can produce this state; the
+   * module always writes the installed version.
+   */
+  async function ageSpec(specId: string, content: ImplementationSpecContent) {
+    return client.implementationSpec.update({
+      where: { id: specId },
+      data: { rulesVersion: HISTORICAL_RULES, contentHash: hashUnder(HISTORICAL_RULES, content) },
+    })
+  }
+
+  it('recomputes an older specification from its persisted rules version, not the installed one', async () => {
+    const { project, task } = await seedTask('spec-histhash')
+    const spec = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-histhash'),
+      version: '1.0.0',
+      content: content(),
+    })
+    const stored = requireContent(spec)
+    const aged = await ageSpec(spec.id, stored)
+
+    expect(recomputeImplementationSpecContentHash(aged)).toEqual({ ok: true, value: aged.contentHash })
+
+    // The test only means something if the installed rule set would have
+    // produced a different answer — which is precisely the defect this
+    // guards against.
+    expect(aged.contentHash).not.toBe(hashUnder(SPEC_LIFECYCLE_VERSION, stored))
+    expect(aged.contentHash).not.toBe(spec.contentHash)
+  })
+
+  it('keeps an older specification identity stable while newer specifications are authored', async () => {
+    const { project, task } = await seedTask('spec-histstable')
+    const older = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-histstable'),
+      version: '1.0.0',
+      content: content(),
+    })
+    const aged = await ageSpec(older.id, requireContent(older))
+
+    // Author more specifications under the installed rule set in between.
+    const { task: otherTask } = await seedTask('spec-histstable-other')
+    await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-histstable-b'),
+      version: '1.0.0',
+      content: content({ risks: ['unrelated'] }),
+    })
+    expect(otherTask.id).not.toBe(task.id)
+
+    const reloaded = await findImplementationSpecForProject(client, project.id, older.id)
+    expect(reloaded).toMatchObject({ rulesVersion: HISTORICAL_RULES, contentHash: aged.contentHash })
+    expect(reloaded && recomputeImplementationSpecContentHash(reloaded)).toEqual({
+      ok: true,
+      value: aged.contentHash,
+    })
+  })
+
+  it('leaves rulesVersion and contentHash untouched when a specification is approved', async () => {
+    const { project, task } = await seedTask('spec-approvehash')
+    const spec = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-approvehash'),
+      version: '1.0.0',
+      content: content(),
+    })
+    const aged = await ageSpec(spec.id, requireContent(spec))
+
+    const approved = await approveImplementationSpec(client, {
+      projectId: project.id,
+      specId: spec.id,
+      approvedByOperatorId: await approverId(),
+    })
+
+    // Approval is a lifecycle transition, not a re-authoring.
+    expect(approved.rulesVersion).toBe(HISTORICAL_RULES)
+    expect(approved.contentHash).toBe(aged.contentHash)
+    expect(recomputeImplementationSpecContentHash(approved)).toEqual({ ok: true, value: aged.contentHash })
+  })
+
+  it('re-authors a draft under the installed rule set when its content is edited', async () => {
+    const { project, task } = await seedTask('spec-editrules')
+    const spec = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-editrules'),
+      version: '1.0.0',
+      content: content(),
+    })
+    await ageSpec(spec.id, requireContent(spec))
+
+    const edited = await updateImplementationSpecDraft(client, project.id, spec.id, content({ risks: ['edited'] }))
+
+    // Editing a draft IS authoring, so the installed rule set applies and
+    // the two columns move together.
+    expect(edited.rulesVersion).toBe(SPEC_LIFECYCLE_VERSION)
+    expect(recomputeImplementationSpecContentHash(edited)).toEqual({ ok: true, value: edited.contentHash })
   })
 })
 
@@ -967,5 +1110,268 @@ describe('execution eligibility', () => {
     const outcome = await resolveImplementationSpecExecutionEligibility(client, own.project.id, other.task.id)
 
     expect(outcome.findings.map(finding => finding.reason)).toEqual([SpecEligibilityReason.MISSING])
+  })
+})
+
+// ── Eligibility consistency under concurrency ─────────────────────────────────
+
+/**
+ * An eligibility verdict is assembled from several facts that live in
+ * different tables: which specification currently governs the Task, its
+ * traceability links, and the status of the requirements and decisions those
+ * links point at. Read independently, they can describe a state that never
+ * existed — an approved specification paired with strategic truth that was
+ * only superseded after the specification had already been retired.
+ *
+ * Every writer that can move any of those facts holds the owning project's
+ * row lock: the specification lifecycle and traceability writes in this
+ * module, and the requirement and decision writes in `strategic-truth.ts`.
+ * The eligibility read takes that same lock, so none of them can commit
+ * while a verdict is being assembled.
+ *
+ * These tests use explicit transaction barriers rather than sleeps: the
+ * writer holds the lock and the reader is provably made to wait for it, so
+ * the outcome never depends on timing.
+ */
+describe('eligibility consistency under concurrency', () => {
+  const CONCURRENCY_TIMEOUT_MS = 30_000
+
+  // Establish the second pool's connection up front. A cold pool connects
+  // lazily on first use, which would take longer than the barrier below
+  // waits and make the reader look blocked when it had simply not started.
+  beforeAll(async () => {
+    await concurrentClient.$queryRaw`SELECT 1`
+  })
+
+  /** No findings — the state before the concurrent change. */
+  const CONSISTENT_BEFORE: string[] = []
+  /** Both findings — the state after it. */
+  const CONSISTENT_AFTER: string[] = [
+    SpecEligibilityReason.SUPERSEDED,
+    SpecEligibilityReason.STALE_STRATEGIC_TRUTH,
+  ]
+
+  /**
+   * A Task whose eligibility is currently clean, plus the two facts a
+   * concurrent writer will change together: the governing specification and
+   * the requirement it traces to.
+   */
+  async function seedEligibleTask(prefix: string) {
+    const { project, task } = await seedTask(prefix)
+    const truth = await seedStrategicTruth(project.id)
+    const spec = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug(`ric-spec-${prefix}`),
+      version: '1.0.0',
+      content: content(),
+      requirementIds: [truth.requirementId],
+    })
+    await approveImplementationSpec(client, {
+      projectId: project.id,
+      specId: spec.id,
+      approvedByOperatorId: await approverId(),
+    })
+
+    return { project, task, spec, requirementId: truth.requirementId }
+  }
+
+  /**
+   * Retires the specification and supersedes the requirement it traces to,
+   * as one governed writer would: both facts change under the project row
+   * lock, in one transaction.
+   *
+   * Read consistently, the Task is either fully before this (no findings) or
+   * fully after it (retired AND stale). A verdict naming only one of the two
+   * describes a state the database was never in.
+   */
+  async function retireSpecAndTruth(
+    tx: Prisma.TransactionClient,
+    specId: string,
+    requirementId: string,
+  ): Promise<void> {
+    await tx.implementationSpec.update({
+      where: { id: specId },
+      data: { status: ImplementationSpecStatus.SUPERSEDED, supersededAt: new Date() },
+    })
+    await tx.requirement.update({ where: { id: requirementId }, data: { status: 'SUPERSEDED' } })
+  }
+
+  /**
+   * The barrier this suite is built on: PostgreSQL's own view of who is
+   * waiting for whom.
+   *
+   * Rather than inferring "the reader must have been blocked" from the order
+   * two promises happened to settle — which is a race, and passes for the
+   * wrong reason whenever the reader is merely slower — this asks the
+   * database directly whether some other backend is blocked *by this
+   * transaction*. Once the reader is queued behind our row lock it stays
+   * queued until we commit, so the condition is stable rather than
+   * momentary.
+   *
+   * Polls with real queries and a hard bound instead of sleeping. If the
+   * reader never takes the lock, the loop simply exhausts — and by then it
+   * has had far more round-trips than it needs to finish, so a
+   * non-locking implementation fails this assertion rather than sneaking
+   * past it.
+   */
+  async function waitUntilBlockedByThisTransaction(tx: Prisma.TransactionClient): Promise<boolean> {
+    const pidRows = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`
+    const writerPid = pidRows[0]?.pid
+
+    expect(writerPid).toBeDefined()
+
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const blockedRows = await tx.$queryRaw<Array<{ blocked: number }>>`
+        SELECT count(*)::int AS blocked
+          FROM pg_stat_activity activity
+         WHERE activity.pid <> ${writerPid}
+           AND ${writerPid} = ANY(pg_blocking_pids(activity.pid))
+      `
+
+      if ((blockedRows[0]?.blocked ?? 0) > 0) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  it('is queued behind an in-flight governed mutation instead of reading around it', async () => {
+    const { project, task, spec, requirementId } = await seedEligibleTask('elig-barrier')
+
+    expect((await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)).eligible).toBe(true)
+
+    const order: string[] = []
+    let pendingOutcome: Promise<SpecEligibilityOutcome> | undefined
+    let readerWasBlocked = false
+
+    await client.$transaction(async (tx) => {
+      // Hold exactly the lock every governed writer takes, and make both
+      // changes *before* the reader starts. They are uncommitted now, so
+      // under MVCC a reader that does not take this lock would happily
+      // return the stale pre-change state — the read this correction exists
+      // to prevent.
+      await tx.$queryRaw`SELECT id FROM projects WHERE id = ${project.id}::uuid FOR UPDATE`
+      await retireSpecAndTruth(tx, spec.id, requirementId)
+
+      pendingOutcome = resolveImplementationSpecExecutionEligibility(concurrentClient, project.id, task.id)
+        .then((outcome) => {
+          order.push('eligibility')
+          return outcome
+        })
+
+      readerWasBlocked = await waitUntilBlockedByThisTransaction(tx)
+    })
+
+    order.push('commit')
+
+    const outcome = await (pendingOutcome ?? Promise.reject(new Error('eligibility was never started')))
+
+    // PostgreSQL itself reported the reader waiting on this transaction.
+    expect(readerWasBlocked).toBe(true)
+    // It therefore only ran once the writer had committed…
+    expect(order).toEqual(['commit', 'eligibility'])
+    // …and saw both halves of the change, never one without the other and
+    // never the pre-change state.
+    expect(outcome.findings.map(finding => finding.reason)).toEqual(CONSISTENT_AFTER)
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('never blends pre-change specification state with post-change strategic truth', async () => {
+    const { project, task, spec, requirementId } = await seedEligibleTask('elig-race')
+
+    const [outcome] = await Promise.all([
+      resolveImplementationSpecExecutionEligibility(concurrentClient, project.id, task.id),
+      client.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM projects WHERE id = ${project.id}::uuid FOR UPDATE`
+        await retireSpecAndTruth(tx, spec.id, requirementId)
+      }),
+    ])
+
+    const reasons = outcome.findings.map(finding => finding.reason)
+
+    // Exactly one of the two whole states — never [SUPERSEDED] alone (the
+    // specification retired but its truth still current) and never
+    // [STALE_STRATEGIC_TRUTH] alone (truth superseded while the
+    // specification still counts as the authority). Both are impossible
+    // states that a torn read would happily report.
+    expect([CONSISTENT_BEFORE, CONSISTENT_AFTER]).toContainEqual(reasons)
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('never blends pre-change specification state with post-change traceability links', async () => {
+    const { project, task, spec, requirementId } = await seedEligibleTask('elig-linkrace')
+
+    const [outcome] = await Promise.all([
+      resolveImplementationSpecExecutionEligibility(concurrentClient, project.id, task.id),
+      client.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM projects WHERE id = ${project.id}::uuid FOR UPDATE`
+        // Retire the specification and drop its traceability links together.
+        // Link removal has no public API by design; a direct write is the
+        // only way to exercise the read against a changing link set.
+        await tx.implementationSpec.update({
+          where: { id: spec.id },
+          data: { status: ImplementationSpecStatus.SUPERSEDED, supersededAt: new Date() },
+        })
+        await tx.implementationSpecRequirement.deleteMany({ where: { specId: spec.id } })
+        await tx.requirement.update({ where: { id: requirementId }, data: { status: 'SUPERSEDED' } })
+      }),
+    ])
+
+    const reasons = outcome.findings.map(finding => finding.reason)
+
+    // After the change the links are gone, so only the lifecycle finding
+    // remains; before it, nothing. A torn read could report a retired
+    // specification still carrying its old links, or a live one with none.
+    expect([CONSISTENT_BEFORE, [SpecEligibilityReason.SUPERSEDED]]).toContainEqual(reasons)
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('does not serialize eligibility of one project behind another project lock', async () => {
+    const [subject, unrelated] = await Promise.all([
+      seedEligibleTask('elig-isoa'),
+      seedTask('elig-isob'),
+    ])
+
+    // Hold an unrelated project's row lock for the whole read. Because the
+    // lock is per project, the subject's eligibility must still resolve.
+    const outcome = await client.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM projects WHERE id = ${unrelated.project.id}::uuid FOR UPDATE`
+
+      return resolveImplementationSpecExecutionEligibility(concurrentClient, subject.project.id, subject.task.id)
+    })
+
+    expect(outcome).toEqual({ eligible: true, rulesVersion: SPEC_LIFECYCLE_VERSION, findings: [] })
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('releases the lock so governed writes remain possible after a read', async () => {
+    const { project, task } = await seedEligibleTask('elig-release')
+
+    await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)
+
+    // The write path still works, and still takes the same lock.
+    const replacement = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-eligrelease'),
+      version: '1.0.0',
+      content: content(),
+    })
+
+    expect(replacement.status).toBe(ImplementationSpecStatus.DRAFT)
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('still answers for an archived project, because reads stay permitted there', async () => {
+    const { project, task } = await seedEligibleTask('elig-archived')
+    await transitionProjectLifecycle(client, project.id, 'ARCHIVE')
+
+    // The consistent-read envelope takes the same row lock as a writer but
+    // deliberately does not apply the archived-project write rule.
+    const outcome = await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)
+
+    expect(outcome.eligible).toBe(true)
+  }, CONCURRENCY_TIMEOUT_MS)
+
+  it('reports an unknown project rather than an empty verdict', async () => {
+    await expect(resolveImplementationSpecExecutionEligibility(client, UNKNOWN_UUID, UNKNOWN_UUID))
+      .rejects.toBeInstanceOf(ProjectNotFoundError)
   })
 })
