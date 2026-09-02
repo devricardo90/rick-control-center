@@ -224,6 +224,26 @@ enum BacklogExternalProvider {
   @@map("backlog_external_provider")
 }
 
+// NDERCC-23 / DEC-RIC-010: governed SDD specification lifecycle (P1-038).
+//
+// The same four-state vocabulary as `decision_status` and
+// `document_approval_status`, kept a separate type so the specification
+// lifecycle can evolve later without silently redefining either of them.
+//
+// There is deliberately no VALIDATED member. Validity is a pure function of
+// specification content, recomputed on demand by @rick/domain; persisting a
+// verdict would let it drift away from the content it describes — the same
+// reasoning that keeps READY/BLOCKED/AMBIGUOUS/CONFLICT out of
+// `task_status` (DEC-RIC-005 §5).
+enum ImplementationSpecStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+  SUPERSEDED
+
+  @@map("implementation_spec_status")
+}
+
 // Root isolation aggregate. Every operational entity belongs to a Project.
 model Project {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -247,6 +267,9 @@ model Project {
   epics                  Epic[]
   tasks                  Task[]
   taskDependencies       TaskDependency[]
+  implementationSpecs    ImplementationSpec[]
+  implementationSpecRequirements ImplementationSpecRequirement[]
+  implementationSpecDecisions    ImplementationSpecDecision[]
 
   @@map("projects")
 }
@@ -425,6 +448,15 @@ model Requirement {
   documentSource DocumentSource @relation(fields: [documentSourceId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
   sourceSnapshot DocumentSnapshot @relation(fields: [sourceSnapshotId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
 
+  specLinks ImplementationSpecRequirement[]
+
+  // Additive index introduced by NDERCC-23. `id` is already unique on its
+  // own, so this changes no existing behaviour; it exists solely so an
+  // implementation specification can reference a requirement through a
+  // composite (id, project_id) foreign key, making a cross-project link
+  // impossible at the database level rather than only in application code.
+  // The NDERCC-16 migration itself is not edited.
+  @@unique([id, projectId], map: "requirements_id_project_key")
   @@unique([projectId, code], map: "requirements_project_code_key")
   @@index([projectId, status], map: "requirements_project_status_idx")
   @@index([documentSourceId], map: "requirements_document_source_idx")
@@ -458,6 +490,7 @@ model Decision {
   sourceSnapshot DocumentSnapshot @relation(fields: [sourceSnapshotId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
   supersedes     Decision?      @relation("DecisionSupersession", fields: [supersedesDecisionId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
   supersededBy   Decision[]     @relation("DecisionSupersession")
+  specLinks      ImplementationSpecDecision[]
 
   @@unique([id, projectId], map: "decisions_id_project_key")
   @@unique([projectId, code], map: "decisions_project_code_key")
@@ -605,6 +638,7 @@ model Task {
 
   dependencies TaskDependency[] @relation("TaskDependsOnEdges")
   dependents   TaskDependency[] @relation("TaskPrerequisiteEdges")
+  implementationSpecs ImplementationSpec[]
 
   @@unique([projectId, code], map: "tasks_project_code_key")
   @@unique([sprintId, sequence], map: "tasks_sprint_sequence_key")
@@ -693,6 +727,9 @@ model Operator {
   updatedAt    DateTime @updatedAt @db.Timestamptz(3) @map("updated_at")
 
   sessions AuthSession[]
+  // Specifications this operator approved. Restrict on delete: an approval
+  // must never lose the actor that granted it (NDERCC-23).
+  approvedImplementationSpecs ImplementationSpec[]
 
   @@map("operators")
 }
@@ -717,4 +754,167 @@ model AuthSession {
 
   @@index([operatorId])
   @@map("auth_sessions")
+}
+
+// ── Spec-Driven Development layer (NDERCC-23 / DEC-RIC-010 / P1-038) ─────────
+//
+// The mandatory specification layer RIC-E07A places between requirements and
+// planning on one side and the Execution Contract on the other. A governed
+// implementation specification is what an Execution Contract will later be
+// derived FROM; nothing in this slice models, generates, validates or hashes
+// a contract itself — that is P0-040 through P0-043 and does not exist yet.
+//
+// Identity has two independent halves:
+//
+//   - lineage identity `(project_id, code)` — e.g. RIC-SPEC-NDERCC-23-001,
+//     the convention already used informally in Jira (DEC-RIC-006,
+//     DEC-RIC-009), now made explicit;
+//   - version identity `major.minor.patch`, stored both as three integer
+//     columns (so ordering in SQL is a correct total order rather than
+//     lexicographic) and as the canonical string actually written in
+//     documents and Jira.
+//
+// A revision is a NEW ROW. Content is mutable only while DRAFT; once a row
+// leaves DRAFT it is frozen for the rest of its life, and there is no update
+// or delete operation for a non-DRAFT specification anywhere on the
+// package's public surface. That is what makes an approval evidence of
+// something.
+//
+// Two invariants have no Prisma schema representation and are written by
+// hand in the NDERCC-23 migration SQL, the same situation as
+// `operators_singleton_check` and `task_dependencies_no_self_check`. A
+// future `prisma migrate dev` touching these tables must not let the schema
+// differ drop them as unrepresented drift:
+//
+//   - `implementation_specs_task_approved_key` — a PARTIAL unique index
+//     (`WHERE status = 'APPROVED'`) enforcing at most one approved
+//     specification per Task, so contract derivation can never face two
+//     competing authorities;
+//   - `implementation_specs_supersedes_self_check` — a specification cannot
+//     supersede itself.
+model ImplementationSpec {
+  id           String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId    String                   @map("project_id") @db.Uuid
+  // The governed unit of work this specification authorises preparation for.
+  // Required: a specification that governs nothing cannot gate anything.
+  taskId       String                   @map("task_id") @db.Uuid
+  // Immutable lineage identity, unique per Project. Trimmed and uppercased.
+  code         String
+  // Canonical `major.minor.patch` spelling, no `v` prefix.
+  version      String
+  versionMajor Int                      @map("version_major")
+  versionMinor Int                      @map("version_minor")
+  versionPatch Int                      @map("version_patch")
+  status       ImplementationSpecStatus @default(DRAFT)
+
+  // ── Content required by RIC-E07A ──
+  // Always required: expected behaviour, scope, out of scope and verifiable
+  // acceptance criteria.
+  title                  String
+  behavior               String
+  scopeJson              Json @map("scope_json")
+  nonGoalsJson           Json @map("non_goals_json")
+  acceptanceCriteriaJson Json @map("acceptance_criteria_json")
+  // RIC-E07A's "quando aplicável" fields. Always present as an ordered
+  // array; an empty array states "none recorded", which is a different
+  // claim from a missing field, so they default to `[]` rather than null.
+  constraintsJson        Json @default("[]") @map("constraints_json")
+  dependenciesJson       Json @default("[]") @map("dependencies_json")
+  risksJson              Json @default("[]") @map("risks_json")
+  interfacesJson         Json @default("[]") @map("interfaces_json")
+  validationStrategyJson Json @default("[]") @map("validation_strategy_json")
+
+  // SHA-256 of the canonical serialization of the content columns above,
+  // recomputed by the persistence layer on every write and never trusted
+  // from a caller — the DocumentSnapshot rule applied here. It identifies
+  // WHAT the specification says; `(project_id, code, version)` identifies
+  // WHICH specification it is. This is not an Execution Contract hash and
+  // does not implement P0-043.
+  contentHash  String @map("content_hash")
+  // The @rick/domain rule-set version whose validation the content was
+  // written against, so a later reader can tell which rules applied.
+  rulesVersion String @map("rules_version")
+
+  // Explicit supersession only: the successor names its predecessor. There
+  // is deliberately no reverse `superseded_by` column — a second pointer
+  // could disagree with this one. "What replaced this?" is the row whose
+  // `supersedes_spec_id` is this id, and the unique index below keeps that
+  // answer singular, so supersession forms a chain rather than a tree.
+  supersedesSpecId String? @map("supersedes_spec_id") @db.Uuid
+
+  // Approval is explicit and attributed, never inferred from state.
+  approvedByOperatorId String?   @map("approved_by_operator_id") @db.Uuid
+  approvedAt           DateTime? @db.Timestamptz(3) @map("approved_at")
+  rejectedAt           DateTime? @db.Timestamptz(3) @map("rejected_at")
+  rejectionReason      String?   @map("rejection_reason")
+  supersededAt         DateTime? @db.Timestamptz(3) @map("superseded_at")
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project    Project             @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  // Composite, so a specification can never govern a Task in another
+  // Project.
+  task       Task                @relation(fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  approvedBy Operator?           @relation(fields: [approvedByOperatorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supersedes ImplementationSpec? @relation("ImplementationSpecSupersession", fields: [supersedesSpecId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  supersededBy ImplementationSpec[] @relation("ImplementationSpecSupersession")
+
+  requirementLinks ImplementationSpecRequirement[]
+  decisionLinks    ImplementationSpecDecision[]
+
+  // Target of the link tables' and the supersession relation's composite
+  // foreign keys, making same-project traceability a database guarantee.
+  @@unique([id, projectId], map: "implementation_specs_id_project_key")
+  // Deterministic version identity.
+  @@unique([projectId, code, version], map: "implementation_specs_project_code_version_key")
+  // A predecessor can be superseded at most once.
+  @@unique([supersedesSpecId], map: "implementation_specs_supersedes_key")
+  @@index([projectId, status], map: "implementation_specs_project_status_idx")
+  @@index([taskId, status], map: "implementation_specs_task_status_idx")
+  // Covers "the current maximum version of this lineage", the read the
+  // monotonic-version rule depends on.
+  @@index([projectId, code, versionMajor, versionMinor, versionPatch], map: "implementation_specs_lineage_order_idx")
+  @@map("implementation_specs")
+}
+
+// Traceability from an approved specification back to the strategic truth it
+// was written against (RIC-006 §4 link-table convention).
+//
+// A link references a Requirement by foreign key and never copies its text,
+// so no second source of truth for a requirement is created. Both composite
+// foreign keys resolve through (id, project_id), so a link spanning two
+// Projects cannot be inserted at all.
+model ImplementationSpecRequirement {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  specId        String   @map("spec_id") @db.Uuid
+  requirementId String   @map("requirement_id") @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+
+  project     Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  spec        ImplementationSpec @relation(fields: [specId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  requirement Requirement        @relation(fields: [requirementId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([specId, requirementId], map: "implementation_spec_requirements_pair_key")
+  @@index([projectId], map: "implementation_spec_requirements_project_idx")
+  @@index([requirementId], map: "implementation_spec_requirements_requirement_idx")
+  @@map("implementation_spec_requirements")
+}
+
+// The Decision half of the same traceability contract.
+model ImplementationSpecDecision {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  specId     String   @map("spec_id") @db.Uuid
+  decisionId String   @map("decision_id") @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(3) @map("created_at")
+
+  project  Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  spec     ImplementationSpec @relation(fields: [specId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  decision Decision           @relation(fields: [decisionId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([specId, decisionId], map: "implementation_spec_decisions_pair_key")
+  @@index([projectId], map: "implementation_spec_decisions_project_idx")
+  @@index([decisionId], map: "implementation_spec_decisions_decision_idx")
+  @@map("implementation_spec_decisions")
 }

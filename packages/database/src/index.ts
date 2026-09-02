@@ -213,6 +213,95 @@ export {
   removeTaskDependency,
 } from './task-dependency.js'
 
+// ── Spec-Driven Development layer (NDERCC-23 / DEC-RIC-010) ──────────────────
+//
+// Create, read and lifecycle-transition operations only. There is
+// deliberately no delete function for a specification or a traceability link
+// anywhere on this surface, and no update function for a specification that
+// has left DRAFT — a superseded specification must stay queryable exactly as
+// it was approved.
+//
+// Nothing here models, generates, validates or hashes an Execution Contract.
+// `resolveImplementationSpecExecutionEligibility` states the deterministic
+// precondition a later contract generator must consult; P0-040 through
+// P0-043 own the contract itself and are not implemented.
+
+export type {
+  ApproveImplementationSpecInput,
+  CreateImplementationSpecInput,
+  ImplementationSpec,
+  ReviseImplementationSpecInput,
+} from './implementation-spec.js'
+export {
+  approveImplementationSpec,
+  createImplementationSpec,
+  findApprovedImplementationSpecForTask,
+  findImplementationSpecForProject,
+  listImplementationSpecDecisionIds,
+  listImplementationSpecLineage,
+  listImplementationSpecRequirementIds,
+  listImplementationSpecsForProject,
+  listImplementationSpecsForTask,
+  readImplementationSpecContent,
+  recomputeImplementationSpecContentHash,
+  rejectImplementationSpec,
+  // The transaction-scoped resolver is the gate; the plain
+  // `resolve…ExecutionEligibility` is a read-only projection. A caller that
+  // grants authority on an eligibility answer must use the former inside its
+  // own writing transaction, so the check and the write cannot be separated.
+  resolveImplementationSpecEligibilityInTransaction,
+  resolveImplementationSpecExecutionEligibility,
+  reviseImplementationSpec,
+  updateImplementationSpecDraft,
+  validateImplementationSpecById,
+} from './implementation-spec.js'
+
+export {
+  DuplicateImplementationSpecCodeError,
+  ImplementationSpecApproverNotFoundError,
+  ImplementationSpecContentFrozenError,
+  ImplementationSpecNotApprovableError,
+  ImplementationSpecNotFoundError,
+  ImplementationSpecSupersessionRequiredError,
+  ImplementationSpecTraceTargetNotFoundError,
+  ImplementationSpecVersionNotIncreasingError,
+  InvalidImplementationSpecInputError,
+  InvalidImplementationSpecSupersessionError,
+  InvalidImplementationSpecTransitionError,
+} from './errors.js'
+
+// The specification enum and every lifecycle rule come from @rick/domain
+// rather than the generated Prisma client, so the domain layer stays the
+// single definition and the two can never drift. The integration tests
+// assert both sets agree.
+export {
+  canonicalSpecContent,
+  canTransitionImplementationSpecStatus,
+  compareSpecVersions,
+  evaluateSpecExecutionEligibility,
+  formatSpecVersion,
+  ImplementationSpecStatus,
+  isImplementationSpecContentMutable,
+  isSpecVersionGreater,
+  isTerminalImplementationSpecStatus,
+  parseImplementationSpecContent,
+  parseSpecVersion,
+  SPEC_LIFECYCLE_VERSION,
+  SpecEligibilityReason,
+  SpecValidationCode,
+  validateImplementationSpec,
+} from '@rick/domain'
+export type {
+  CanonicalSpecInput,
+  ImplementationSpecContent,
+  ImplementationSpecContentInput,
+  SpecEligibilityFinding,
+  SpecEligibilityOutcome,
+  SpecValidationFinding,
+  SpecValidationOutcome,
+  SpecVersion,
+} from '@rick/domain'
+
 export type { PersistedNextWorkResolverInput } from './next-work-resolver-state.js'
 export {
   composeNextWorkResolverState,
