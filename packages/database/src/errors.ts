@@ -325,3 +325,137 @@ export class TaskDependencyFrozenError extends Error {
     this.name = 'TaskDependencyFrozenError'
   }
 }
+
+// ── Implementation specifications (NDERCC-23 / DEC-RIC-010) ───────────────────
+//
+// As elsewhere in this file, a specification that exists but belongs to a
+// different project raises the same not-found error as one that never
+// existed, so these errors never confirm another project's data.
+
+/** No implementation specification with this id exists for the given project. */
+export class ImplementationSpecNotFoundError extends Error {
+  constructor(public readonly specId: string) {
+    super(`Implementation specification not found: ${specId}`)
+    this.name = 'ImplementationSpecNotFoundError'
+  }
+}
+
+/** A specification field failed a domain rule: a blank title or behavior, a malformed code or version, or a statement list that is not an ordered array of non-empty strings. */
+export class InvalidImplementationSpecInputError extends Error {
+  constructor(reason: string) {
+    super(`Invalid implementation specification input: ${reason}`)
+    this.name = 'InvalidImplementationSpecInputError'
+  }
+}
+
+/** The lineage code is already in use in this project. A revision of an existing lineage uses `reviseImplementationSpec`, which is the only path that may reuse a code. */
+export class DuplicateImplementationSpecCodeError extends Error {
+  constructor(
+    public readonly projectId: string,
+    public readonly code: string,
+  ) {
+    super(`Implementation specification code already exists in project ${projectId}: ${code}`)
+    this.name = 'DuplicateImplementationSpecCodeError'
+  }
+}
+
+/**
+ * A revision did not advance its lineage. Version identity must be
+ * deterministic, so a revision has to be strictly greater than every version
+ * the lineage already holds — re-using or lowering one would leave two rows
+ * competing for the same identity.
+ */
+export class ImplementationSpecVersionNotIncreasingError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly candidateVersion: string,
+    public readonly currentVersion: string,
+  ) {
+    super(`Implementation specification version must increase for ${code}: ${candidateVersion} does not follow ${currentVersion}`)
+    this.name = 'ImplementationSpecVersionNotIncreasingError'
+  }
+}
+
+/** A lifecycle transition the specification state machine does not allow from the record's current status, including every transition out of a terminal status. */
+export class InvalidImplementationSpecTransitionError extends Error {
+  constructor(
+    public readonly specId: string,
+    public readonly fromStatus: string,
+    public readonly toStatus: string,
+  ) {
+    super(`Invalid implementation specification transition for ${specId}: ${fromStatus} -> ${toStatus}`)
+    this.name = 'InvalidImplementationSpecTransitionError'
+  }
+}
+
+/** Content was changed after the specification left DRAFT. Content freezes permanently at that point; a change is a new version, never an edit. */
+export class ImplementationSpecContentFrozenError extends Error {
+  constructor(
+    public readonly specId: string,
+    public readonly status: string,
+  ) {
+    super(`Implementation specification content is frozen in status ${status}: ${specId}`)
+    this.name = 'ImplementationSpecContentFrozenError'
+  }
+}
+
+/**
+ * Approval was requested for a specification that does not satisfy the
+ * deterministic validation rules. Carries the finding codes so a caller can
+ * report exactly what is missing without re-deriving them.
+ */
+export class ImplementationSpecNotApprovableError extends Error {
+  constructor(
+    public readonly specId: string,
+    public readonly findingCodes: readonly string[],
+  ) {
+    super(`Implementation specification is not approvable: ${specId} (${findingCodes.join(', ')})`)
+    this.name = 'ImplementationSpecNotApprovableError'
+  }
+}
+
+/**
+ * The Task already has an approved specification and the approval did not
+ * name it as the one being superseded. Supersession is explicit: the system
+ * never picks which specification to retire.
+ */
+export class ImplementationSpecSupersessionRequiredError extends Error {
+  constructor(
+    public readonly taskId: string,
+    public readonly currentApprovedSpecId: string,
+  ) {
+    super(`Task ${taskId} already has an approved specification; supersession must name ${currentApprovedSpecId}`)
+    this.name = 'ImplementationSpecSupersessionRequiredError'
+  }
+}
+
+/** The named predecessor cannot be superseded by this specification — it is not approved, governs a different Task, is the specification itself, or is an earlier version of the same lineage that the successor does not actually follow. */
+export class InvalidImplementationSpecSupersessionError extends Error {
+  constructor(
+    public readonly specId: string,
+    public readonly supersedesSpecId: string,
+    reason: string,
+  ) {
+    super(`Invalid implementation specification supersession ${specId} -> ${supersedesSpecId}: ${reason}`)
+    this.name = 'InvalidImplementationSpecSupersessionError'
+  }
+}
+
+/** Approval named an operator that does not exist. An approval must always carry a real actor — it is explicit, never inferred. */
+export class ImplementationSpecApproverNotFoundError extends Error {
+  constructor(public readonly operatorId: string) {
+    super(`Implementation specification approver not found: ${operatorId}`)
+    this.name = 'ImplementationSpecApproverNotFoundError'
+  }
+}
+
+/** A traceability link named a requirement or decision that does not exist in this project. */
+export class ImplementationSpecTraceTargetNotFoundError extends Error {
+  constructor(
+    public readonly kind: 'Requirement' | 'Decision',
+    public readonly targetId: string,
+  ) {
+    super(`Implementation specification trace target not found: ${kind} ${targetId}`)
+    this.name = 'ImplementationSpecTraceTargetNotFoundError'
+  }
+}

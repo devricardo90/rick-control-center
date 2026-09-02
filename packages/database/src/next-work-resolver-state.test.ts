@@ -287,16 +287,40 @@ describe('persisted read-only and schema invariants', () => {
     expect(after).toEqual(before)
   })
 
-  it('uses the existing eight-migration schema without a new migration', async () => {
+  /**
+   * The eight migrations that were published when NDERCC-19 landed. They must
+   * all still be present and applied — this slice reads their schema and adds
+   * nothing to it.
+   *
+   * The total row count is deliberately no longer asserted. Later authorized
+   * slices add migrations of their own (NDERCC-23 added
+   * `20260902120000_governed_sdd_specification_lifecycle`), and an absolute
+   * count would fail on every one of them without ever saying anything about
+   * NDERCC-19. What this test must keep proving is narrower and does not
+   * decay: NDERCC-19 introduced no migration, and no published migration was
+   * replaced.
+   */
+  const MIGRATIONS_PUBLISHED_AT_NDERCC_19 = [
+    '20260731042518_init',
+    '20260731111843_initial_domain_model',
+    '20260731140025_single_user_authentication',
+    '20260805120000_github_integration_configuration',
+    '20260806151658_document_source_foundation',
+    '20260809140518_document_snapshot_immutable_history',
+    '20260811120000_strategic_truth_extraction',
+    '20260813120000_operational_backlog_model',
+  ] as const
+
+  it('uses the existing published schema without a new migration', async () => {
     const migrations = await client.$queryRaw<Array<{ migration_name: string, finished_at: Date | null }>>`
       SELECT migration_name, finished_at
         FROM _prisma_migrations
        ORDER BY migration_name
     `
-    expect(migrations).toHaveLength(8)
+    const names = migrations.map(migration => migration.migration_name)
+
+    expect(names).toEqual(expect.arrayContaining([...MIGRATIONS_PUBLISHED_AT_NDERCC_19]))
     expect(migrations.every(migration => migration.finished_at !== null)).toBe(true)
-    expect(migrations.map(migration => migration.migration_name)).not.toContain(
-      '20260818000000_next_work_resolver',
-    )
+    expect(names).not.toContain('20260818000000_next_work_resolver')
   })
 })

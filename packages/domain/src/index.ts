@@ -85,6 +85,42 @@ export type {
 } from './next-work-resolver.js'
 
 export {
+  canonicalSpecContent,
+  canTransitionImplementationSpecStatus,
+  compareSpecVersions,
+  evaluateSpecExecutionEligibility,
+  formatSpecVersion,
+  ImplementationSpecStatus,
+  isImplementationSpecContentMutable,
+  isSpecVersionGreater,
+  isTerminalImplementationSpecStatus,
+  normalizeSpecCode,
+  normalizeSpecText,
+  parseImplementationSpecContent,
+  parseSpecVersion,
+  SPEC_LIFECYCLE_VERSION,
+  SpecEligibilityReason,
+  SpecValidationCode,
+  validateImplementationSpec,
+  validateSpecStatements,
+} from './implementation-spec.js'
+export type {
+  ImplementationSpecContent,
+  ImplementationSpecContentInput,
+  ImplementationSpecStatus as ImplementationSpecStatusType,
+  SpecEligibilityFinding,
+  SpecEligibilityInput,
+  SpecEligibilityOutcome,
+  SpecEligibilityReason as SpecEligibilityReasonType,
+  SpecEligibilitySpecInput,
+  SpecValidation,
+  SpecValidationCode as SpecValidationCodeType,
+  SpecValidationFinding,
+  SpecValidationOutcome,
+  SpecVersion,
+} from './implementation-spec.js'
+
+export {
   diagnoseReadiness,
   isReadinessDiagnosticBlockingTask,
   ReadinessDiagnosticCode,
