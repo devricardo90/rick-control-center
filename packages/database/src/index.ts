@@ -221,10 +221,10 @@ export {
 // has left DRAFT — a superseded specification must stay queryable exactly as
 // it was approved.
 //
-// Nothing here models, generates, validates or hashes an Execution Contract.
+// Nothing here generates, validates or hashes an Execution Contract.
 // `resolveImplementationSpecExecutionEligibility` states the deterministic
-// precondition a later contract generator must consult; P0-040 through
-// P0-043 own the contract itself and are not implemented.
+// precondition a later contract generator must consult; P0-041 through P0-043
+// own that later behavior.
 
 export type {
   ApproveImplementationSpecInput,
@@ -340,3 +340,12 @@ export type {
   StrategicSourceLocator,
   StrategicTruthCandidate,
 } from '@rick/domain'
+
+// ── Execution Contract schema (NDERCC-37 / RIC-S3-02 / P0-040) ─────────────
+//
+// Types only: P0-040 defines the persistence shape. Contract generation,
+// completeness/readiness and hashing/versioning remain later tasks.
+export type {
+  PersistedExecutionContract,
+  PersistedExecutionContractTask,
+} from './execution-contract.js'

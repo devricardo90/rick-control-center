@@ -42,9 +42,10 @@
  * database can never hold a specification whose hash disagrees with its own
  * body.
  *
- * This module creates, reads and hashes *specifications*. It does not model,
- * generate, validate or hash an Execution Contract — P0-040 through P0-043
- * own that and none of it exists yet.
+ * This module creates, reads and hashes *specifications*. It does not
+ * generate, validate or hash an Execution Contract. The P0-040 schema is a
+ * separate persistence/domain boundary; P0-041 through P0-043 own its later
+ * behavior.
  *
  * NDERCC-23 / DEC-RIC-010: governed SDD specification lifecycle (P1-038).
  */
@@ -842,7 +843,7 @@ async function findGoverningSpecForTask(
  * `ELIGIBLE` from the projection below and then opening a *second*
  * transaction to create authority would reintroduce exactly the gap this
  * signature exists to close. Nothing here creates, validates or hashes a
- * contract — P0-040 through P0-043 remain unimplemented.
+ * contract — P0-041 through P0-043 remain unimplemented.
  */
 export async function resolveImplementationSpecEligibilityInTransaction(
   tx: Prisma.TransactionClient,
