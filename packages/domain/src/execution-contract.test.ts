@@ -6,7 +6,7 @@ import {
   parseExecutionContract,
   serializeExecutionContract,
 } from './execution-contract.js'
-import type { ExecutionContract } from './execution-contract.js'
+import type { ExecutionContract, ExecutionContractValidation } from './execution-contract.js'
 
 type ContractFixture = {
   [key: string]: unknown
@@ -188,6 +188,31 @@ function parsedFixture(): ExecutionContract {
   return parsed.value
 }
 
+/**
+ * Splits a rejection into the path that failed and the invariant it broke.
+ *
+ * `parseExecutionContract` reports failures as `<path> <reason>` strings
+ * rather than typed codes, matching the parse convention used throughout the
+ * domain package. Asserting the path — and the reason keyword rather than the
+ * full sentence — proves an invalid input was rejected by the *intended*
+ * invariant instead of merely failing somewhere, without binding the test to
+ * human-readable prose or to the membership of an enum.
+ */
+function rejection(result: ExecutionContractValidation<unknown>): { path: string, reason: string } {
+  expect(result.ok).toBe(false)
+  if (result.ok) throw new Error('expected parseExecutionContract to reject the input')
+  const separator = result.error.indexOf(' ')
+  if (separator === -1) return { path: result.error, reason: '' }
+  return { path: result.error.slice(0, separator), reason: result.error.slice(separator + 1) }
+}
+
+const CANONICAL_SECTIONS = [
+  'identity', 'sourceSnapshot', 'objectives', 'scope', 'executionMode', 'agents', 'preconditions',
+  'workUnits', 'commandPolicy', 'riskAssessment', 'validations', 'evidenceRequirements',
+  'approvalGates', 'gitPolicy', 'jiraPolicy', 'retryPolicy', 'recoveryPolicy', 'completionPolicy',
+  'signatures',
+] as const
+
 describe('canonical Execution Contract schema', () => {
   it('accepts the complete structural shape while leaving completeness to P0-042', () => {
     const parsed = parseExecutionContract(validContract())
@@ -199,34 +224,47 @@ describe('canonical Execution Contract schema', () => {
     expect(parsed.ok && parsed.value.validations).toEqual([])
   })
 
-  it('requires every canonical top-level section', () => {
-    const incomplete = { ...validContract() } as Record<string, unknown>
-    delete incomplete.scope
+  it.each(CANONICAL_SECTIONS)('requires the canonical top-level section %s', (section) => {
+    const incomplete = Object.fromEntries(
+      Object.entries(validContract()).filter(([key]) => key !== section),
+    )
 
-    expect(parseExecutionContract(incomplete).ok).toBe(false)
+    // Each section must be rejected by its own presence check, so a missing
+    // section can never be masked by an unrelated failure elsewhere.
+    const failure = rejection(parseExecutionContract(incomplete))
+    expect(failure.path).toBe(`contract.${section}`)
+    expect(failure.reason).toBe('is required')
   })
 
   it('rejects null and unknown enum values in required fields', () => {
     const nullMode = validContract()
     nullMode.executionMode = null
-    expect(parseExecutionContract(nullMode).ok).toBe(false)
+    const modeFailure = rejection(parseExecutionContract(nullMode))
+    expect(modeFailure.path).toBe('contract.executionMode')
+    expect(modeFailure.reason).toContain('must be one of')
 
     const unknownStatus = validContract()
     unknownStatus.identity.status = 'ISSUED'
-    expect(parseExecutionContract(unknownStatus).ok).toBe(false)
+    const statusFailure = rejection(parseExecutionContract(unknownStatus))
+    expect(statusFailure.path).toBe('contract.identity.status')
+    expect(statusFailure.reason).toContain('must be one of')
   })
 
   it('requires an approved ImplementationSpec reference', () => {
     const input = validContract()
     delete (input.identity as Record<string, unknown>).approvedImplementationSpec
 
-    expect(parseExecutionContract(input).ok).toBe(false)
+    const failure = rejection(parseExecutionContract(input))
+    expect(failure.path).toBe('contract.identity.approvedImplementationSpec')
+    expect(failure.reason).toBe('is required')
   })
 
   it('rejects cross-project approved-spec and source trace references', () => {
     const specFromAnotherProject = validContract()
     specFromAnotherProject.identity.approvedImplementationSpec.projectId = 'other-project'
-    expect(parseExecutionContract(specFromAnotherProject).ok).toBe(false)
+    const specFailure = rejection(parseExecutionContract(specFromAnotherProject))
+    expect(specFailure.path).toBe('contract.identity.approvedImplementationSpec.projectId')
+    expect(specFailure.reason).toBe('must equal contract.identity.projectId')
 
     const requirementFromAnotherProject = validContract()
     requirementFromAnotherProject.sourceSnapshot.requirements.push({
@@ -235,7 +273,9 @@ describe('canonical Execution Contract schema', () => {
       code: 'REQ-1',
       status: 'ACTIVE',
     })
-    expect(parseExecutionContract(requirementFromAnotherProject).ok).toBe(false)
+    const requirementFailure = rejection(parseExecutionContract(requirementFromAnotherProject))
+    expect(requirementFailure.path).toBe('contract.sourceSnapshot.requirements')
+    expect(requirementFailure.reason).toBe('must belong to contract.identity.projectId')
   })
 
   it('requires objective task references to belong to the contract task set', () => {
@@ -244,7 +284,9 @@ describe('canonical Execution Contract schema', () => {
     if (!objective) throw new Error('fixture must contain a task objective')
     objective.taskId = 'NDERCC-999'
 
-    expect(parseExecutionContract(input).ok).toBe(false)
+    const failure = rejection(parseExecutionContract(input))
+    expect(failure.path).toBe('contract.objectives.taskObjectives')
+    expect(failure.reason).toBe('must reference contract.identity.taskIds')
   })
 
   it('serializes the same structure deterministically regardless of object insertion order', () => {
