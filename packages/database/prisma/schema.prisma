@@ -244,6 +244,43 @@ enum ImplementationSpecStatus {
   @@map("implementation_spec_status")
 }
 
+// RIC-011 / P0-040: the structural lifecycle vocabulary of an Execution
+// Contract. State transitions, issuance and execution-readiness decisions are
+// deliberately deferred to later Sprint 3 tasks.
+enum ExecutionContractStatus {
+  DRAFT
+  READY
+  ACTIVE
+  COMPLETED
+  FAILED
+  CANCELLED
+  SUPERSEDED
+
+  @@map("execution_contract_status")
+}
+
+// RIC-011 / P0-040: an explicit execution mode is part of the contract
+// authority; it is not inferred from project defaults or runtime state.
+enum ExecutionMode {
+  SUPERVISED
+  CONTROLLED_AUTONOMOUS
+  DRY_RUN
+  RECOVERY
+
+  @@map("execution_mode")
+}
+
+// Contract authors may be people, system processes or agents. The identifier
+// remains an opaque provenance value because not every authorized actor is an
+// Operator row in this repository.
+enum ExecutionActorKind {
+  USER
+  SYSTEM
+  AGENT
+
+  @@map("execution_actor_kind")
+}
+
 // Root isolation aggregate. Every operational entity belongs to a Project.
 model Project {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -270,6 +307,8 @@ model Project {
   implementationSpecs    ImplementationSpec[]
   implementationSpecRequirements ImplementationSpecRequirement[]
   implementationSpecDecisions    ImplementationSpecDecision[]
+  executionContracts     ExecutionContract[]
+  executionContractTasks ExecutionContractTask[]
 
   @@map("projects")
 }
@@ -534,6 +573,7 @@ model Sprint {
   project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   epics   Epic[]
   tasks   Task[]
+  executionContracts ExecutionContract[]
 
   @@unique([projectId, code], map: "sprints_project_code_key")
   @@unique([projectId, sequence], map: "sprints_project_sequence_key")
@@ -639,6 +679,7 @@ model Task {
   dependencies TaskDependency[] @relation("TaskDependsOnEdges")
   dependents   TaskDependency[] @relation("TaskPrerequisiteEdges")
   implementationSpecs ImplementationSpec[]
+  executionContractTasks ExecutionContractTask[]
 
   @@unique([projectId, code], map: "tasks_project_code_key")
   @@unique([sprintId, sequence], map: "tasks_sprint_sequence_key")
@@ -646,6 +687,9 @@ model Task {
   // Target of both TaskDependency edges, making same-project dependencies a
   // database guarantee.
   @@unique([id, projectId], map: "tasks_id_project_key")
+  // Target of ExecutionContractTask's three-column membership foreign key,
+  // which makes a contract task's sprint agree with the contract sprint.
+  @@unique([id, projectId, sprintId], map: "tasks_id_project_sprint_key")
   @@index([projectId, status], map: "tasks_project_status_idx")
   // Covers the deterministic planning-order listing (sprint -> status ->
   // priority -> sequence) that P0-031 will later read.
@@ -761,8 +805,8 @@ model AuthSession {
 // The mandatory specification layer RIC-E07A places between requirements and
 // planning on one side and the Execution Contract on the other. A governed
 // implementation specification is what an Execution Contract will later be
-// derived FROM; nothing in this slice models, generates, validates or hashes
-// a contract itself — that is P0-040 through P0-043 and does not exist yet.
+// derived FROM; this section owns only the specification lifecycle. Contract
+// generation, completeness and hashing remain outside this module.
 //
 // Identity has two independent halves:
 //
@@ -861,6 +905,7 @@ model ImplementationSpec {
 
   requirementLinks ImplementationSpecRequirement[]
   decisionLinks    ImplementationSpecDecision[]
+  executionContracts ExecutionContract[]
 
   // Target of the link tables' and the supersession relation's composite
   // foreign keys, making same-project traceability a database guarantee.
@@ -875,6 +920,95 @@ model ImplementationSpec {
   // monotonic-version rule depends on.
   @@index([projectId, code, versionMajor, versionMinor, versionPatch], map: "implementation_specs_lineage_order_idx")
   @@map("implementation_specs")
+}
+
+// ── Execution Contract schema (RIC-011 / RIC-E06 / P0-040) ────────────────
+//
+// This is the canonical structural persistence boundary. The relational
+// columns own contract identity, authority references, lifecycle vocabulary
+// and project/task isolation. The remaining RIC-011 sections are stored as
+// JSON values because P0-040 defines their shape without prematurely creating
+// a second relational state model for later compiler/runtime work.
+//
+// No generator, issuance workflow, completeness gate or contract digest is
+// implemented here. `contentHash` is nullable until P0-043 defines sealing;
+// once populated it is audit data, not a value trusted from a caller.
+//
+// The approved ImplementationSpec relation is a reference, not a copy of
+// specification content. Its immutable version, lineage and approval evidence
+// are obtained through that relation; storing a second copy here would create
+// a driftable authority. `ExecutionContractTask.position` preserves the
+// canonical task_ids order and the three-column relations make
+// contract/sprint/task project isolation a database invariant.
+model ExecutionContract {
+  id                                      String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId                               String                   @map("project_id") @db.Uuid
+  sprintId                                String                   @map("sprint_id") @db.Uuid
+  contractVersion                         String                   @map("contract_version")
+  status                                  ExecutionContractStatus   @default(DRAFT)
+  executionMode                           ExecutionMode            @map("execution_mode")
+  sourceSnapshotId                        String                   @map("source_snapshot_id")
+  contentHash                             String?                  @map("content_hash")
+  // The referenced P1-038 row carries the exact immutable version, lineage,
+  // approval actor and approval timestamp represented by the domain reference.
+  approvedImplementationSpecId            String                   @map("approved_implementation_spec_id") @db.Uuid
+  createdByKind                           ExecutionActorKind       @map("created_by_kind")
+  createdById                             String                   @map("created_by_id")
+
+  sourceSnapshotJson                      Json                     @map("source_snapshot_json")
+  objectivesJson                          Json                     @map("objectives_json")
+  scopeJson                               Json                     @map("scope_json")
+  agentsJson                              Json                     @map("agents_json")
+  preconditionsJson                       Json                     @map("preconditions_json")
+  workUnitsJson                           Json                     @map("work_units_json")
+  commandPolicyJson                       Json                     @map("command_policy_json")
+  riskAssessmentJson                      Json                     @map("risk_assessment_json")
+  validationsJson                         Json                     @map("validations_json")
+  evidenceRequirementsJson                Json                     @map("evidence_requirements_json")
+  approvalGatesJson                       Json                     @map("approval_gates_json")
+  gitPolicyJson                           Json                     @map("git_policy_json")
+  jiraPolicyJson                          Json                     @map("jira_policy_json")
+  retryPolicyJson                         Json                     @map("retry_policy_json")
+  recoveryPolicyJson                      Json                     @map("recovery_policy_json")
+  completionPolicyJson                    Json                     @map("completion_policy_json")
+  signaturesJson                          Json                     @map("signatures_json")
+
+  createdAt                               DateTime                 @default(now()) @db.Timestamptz(3) @map("created_at")
+  updatedAt                               DateTime                 @updatedAt @db.Timestamptz(3) @map("updated_at")
+
+  project                    Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sprint                     Sprint             @relation(fields: [sprintId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  approvedImplementationSpec ImplementationSpec @relation(fields: [approvedImplementationSpecId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: Cascade)
+  tasks                      ExecutionContractTask[]
+
+  // Target of the join-table composite foreign keys below. The additional
+  // unique key does not change identity; it exposes the contract's project
+  // and sprint pair to PostgreSQL for an isolation-preserving FK.
+  @@unique([id, projectId, sprintId], map: "execution_contracts_id_project_sprint_key")
+  @@index([projectId, status], map: "execution_contracts_project_status_idx")
+  @@index([sprintId], map: "execution_contracts_sprint_idx")
+  @@index([approvedImplementationSpecId], map: "execution_contracts_spec_idx")
+  @@map("execution_contracts")
+}
+
+// Ordered task membership for the canonical identity.task_ids array. It is a
+// separate model so the database can preserve order and enforce that every
+// member belongs to both the contract's project and sprint.
+model ExecutionContractTask {
+  executionContractId String @map("execution_contract_id") @db.Uuid
+  projectId           String @map("project_id") @db.Uuid
+  sprintId            String @map("sprint_id") @db.Uuid
+  taskId              String @map("task_id") @db.Uuid
+  position            Int
+
+  project          Project          @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  executionContract ExecutionContract @relation(fields: [executionContractId, projectId, sprintId], references: [id, projectId, sprintId], onDelete: Restrict, onUpdate: Cascade)
+  task             Task             @relation(fields: [taskId, projectId, sprintId], references: [id, projectId, sprintId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([executionContractId, projectId, taskId])
+  @@unique([executionContractId, projectId, position], map: "execution_contract_tasks_contract_position_key")
+  @@index([projectId, taskId], map: "execution_contract_tasks_project_task_idx")
+  @@map("execution_contract_tasks")
 }
 
 // Traceability from an approved specification back to the strategic truth it

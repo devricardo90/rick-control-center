@@ -11,8 +11,8 @@
  * prove the database rejects what the application layer also rejects; a mock
  * could only prove the application half.
  *
- * No test here touches the network, and no Execution Contract is created,
- * derived or asserted on anywhere — P0-040 through P0-043 do not exist yet.
+ * No test here touches the network, and no Execution Contract is created or
+ * derived anywhere — this suite remains scoped to P1-038.
  *
  * Test files run in parallel against one database and nothing is truncated
  * between tests, so every test creates its own project and scopes its
