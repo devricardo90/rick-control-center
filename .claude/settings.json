@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Bash(git credential:*)",
+      "Bash(git credential-manager:*)",
+      "Bash(git credential-store:*)",
+      "Bash(git credential-cache:*)",
+      "Bash(git credential-osxkeychain:*)",
+      "Bash(curl)",
+      "Bash(curl:*)",
+      "Bash(curl.exe:*)",
+      "Bash(/usr/bin/curl:*)",
+      "Bash(/mingw64/bin/curl:*)",
+      "Bash(wget)",
+      "Bash(wget:*)",
+      "Bash(wget.exe:*)",
+      "Bash(/usr/bin/wget:*)",
+      "Bash(/mingw64/bin/wget:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push --force-if-includes:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --delete:*)",
+      "Bash(git push -d:*)",
+      "Bash(git push --mirror:*)",
+      "Bash(git push --prune:*)"
+    ],
+    "ask": [
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Bash(python -c:*)",
+      "Bash(python3 -c:*)",
+      "Bash(py -c:*)",
+      "Bash(python.exe -c:*)",
+      "Bash(/c/Python314/python -c:*)",
+      "Bash(/c/Python314/python.exe -c:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/git-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
