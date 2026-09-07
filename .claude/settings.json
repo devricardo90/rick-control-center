@@ -36,5 +36,18 @@
       "Bash(/c/Python314/python -c:*)",
       "Bash(/c/Python314/python.exe -c:*)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/git-guard.mjs\""
+          }
+        ]
+      }
+    ]
   }
 }

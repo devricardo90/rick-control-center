@@ -8,6 +8,7 @@ export default defineConfig({
       'packages/*/src/**/*.{test,spec}.ts',
       'apps/*/tests/**/*.{test,spec}.ts',
       'scripts/check-patterns.test.ts',
+      '.claude/hooks/*.test.ts',
     ],
     coverage: {
       provider: 'v8',
