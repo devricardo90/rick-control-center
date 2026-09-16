@@ -201,3 +201,23 @@ export type {
   StrategicConflictEvidence,
   StrategicConflictEvidenceKey,
 } from './readiness-diagnostics.js'
+
+// P0-041: generation of a canonical Execution Contract from an eligible
+// Implementation Spec. Consults the eligibility decision produced by
+// `evaluateSpecExecutionEligibility` rather than recomputing it, so one
+// eligibility implementation governs both the gate and the generator.
+export {
+  ContractGenerationRefusal,
+  EXECUTION_CONTRACT_GENERATOR_VERSION,
+  generateExecutionContract,
+} from './execution-contract-generation.js'
+
+export type {
+  ContractGenerationFailure,
+  ContractGenerationResult,
+  ExecutionContractGenerationInput,
+  GenerationEnvironmentInput,
+  GenerationIdentityInput,
+  GenerationSpecInput,
+  GenerationTraceabilityInput,
+} from './execution-contract-generation.js'

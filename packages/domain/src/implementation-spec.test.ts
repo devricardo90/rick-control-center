@@ -257,7 +257,10 @@ describe('canonical content serialization', () => {
   /** A rule-set version that is deliberately not the installed one, standing in for a specification authored under earlier rules. */
   const HISTORICAL_RULES = 'P1_038_V0'
   /** A rule-set version standing in for a future bump, so a test can prove an old specification is unaffected by one. */
-  const FUTURE_RULES = 'P1_038_V2'
+  // A rule set newer than the installed SPEC_LIFECYCLE_VERSION. It must stay
+  // strictly ahead of that constant: when the installed version is bumped, this
+  // moves with it, or the distinctness assertions below compare a value to itself.
+  const FUTURE_RULES = 'P1_038_V3'
 
   function canonical(rulesVersion: string, overrides: Partial<ImplementationSpecContentInput> = {}): string {
     return canonicalSpecContent({ rulesVersion, content: parsedContent(overrides) })
@@ -339,6 +342,10 @@ describe('canonical content serialization', () => {
 
 describe('execution eligibility', () => {
   const approvedAndValid = { status: ImplementationSpecStatus.APPROVED, contentValid: true }
+  // Traceability is a precondition of its own (MISSING_TRACEABILITY). Fixtures below
+  // supply one current requirement link so each test asserts the invariant it names
+  // instead of incidentally tripping the traceability rule.
+  const tracedToCurrentTruth = [{ id: 'req-current', status: 'ACTIVE' }] as const
 
   it('is eligible for an approved, valid specification traced to current truth', () => {
     const outcome = evaluateSpecExecutionEligibility({
@@ -368,7 +375,7 @@ describe('execution eligibility', () => {
   ])('blocks a %s specification with %s', (status, reason) => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: { status, contentValid: true },
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [],
     })
 
@@ -379,7 +386,7 @@ describe('execution eligibility', () => {
   it('blocks an approved specification whose stored body no longer validates', () => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: { status: ImplementationSpecStatus.APPROVED, contentValid: false },
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [],
     })
 
@@ -404,7 +411,7 @@ describe('execution eligibility', () => {
   it.each(['PROPOSED', 'REJECTED', 'SUPERSEDED'] as const)('blocks when a linked decision is %s', (status) => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: approvedAndValid,
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [{ id: 'dec-1', status }],
     })
 
@@ -426,6 +433,18 @@ describe('execution eligibility', () => {
       SpecEligibilityReason.STALE_STRATEGIC_TRUTH,
       SpecEligibilityReason.STALE_STRATEGIC_TRUTH,
     ])
+  })
+
+  it('blocks an otherwise-perfect specification that is traced to nothing (GAP-03)', () => {
+    const outcome = evaluateSpecExecutionEligibility({
+      spec: approvedAndValid,
+      linkedRequirements: [],
+      linkedDecisions: [],
+    })
+
+    expect(outcome.eligible).toBe(false)
+    expect(outcome.findings.map(finding => finding.reason))
+      .toEqual([SpecEligibilityReason.MISSING_TRACEABILITY])
   })
 
   it('returns an identical outcome for identical input', () => {
