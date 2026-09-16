@@ -542,6 +542,16 @@ export const SpecEligibilityReason = {
   INVALID_CONTENT: 'INVALID_CONTENT',
   /** Approved strategic truth the specification was traced to has since moved on. */
   STALE_STRATEGIC_TRUTH: 'STALE_STRATEGIC_TRUTH',
+  /**
+   * The specification carries no traceability to strategic truth at all.
+   *
+   * RIC-004 RIC-E07A requires that specifications be *rastreáveis* — linked to
+   * requirements and decisions for end-to-end traceability. Without this reason
+   * an unlinked specification passed eligibility *vacuously*: STALE_STRATEGIC_TRUTH
+   * is a per-link predicate, and a predicate over an empty set reports nothing
+   * wrong. Absence of evidence was being read as evidence of soundness.
+   */
+  MISSING_TRACEABILITY: 'MISSING_TRACEABILITY',
 } as const
 export type SpecEligibilityReason = typeof SpecEligibilityReason[keyof typeof SpecEligibilityReason]
 
@@ -619,6 +629,38 @@ function staleTruthFindings(input: SpecEligibilityInput): SpecEligibilityFinding
 }
 
 /**
+ * Traceability coverage, evaluated as a cardinality rather than as a per-link
+ * predicate.
+ *
+ * This is the check whose absence let an unlinked specification be declared
+ * execution-eligible. `staleTruthFindings` above asks "is every link I was
+ * given still current?"; over an empty set that is trivially true. This asks
+ * the complementary question "do the links that must exist, exist?", which no
+ * amount of per-link checking can answer.
+ *
+ * **At least one linked requirement** is the rule, and the granularity is
+ * deliberate. Traceability in RIC-006 §4 / DEC-RIC-010 is modelled at the
+ * *specification* level — `implementation_spec_requirements` joins a whole
+ * specification to a requirement — so specification-to-requirement linkage is
+ * the finest coverage the canonical model can express. Per-acceptance-criterion
+ * coverage would require new link columns and a migration, and is therefore not
+ * asserted here.
+ *
+ * Decisions are deliberately *not* required. DEC-RIC-010 treats a decision as a
+ * constraint a specification may be written under, not as a universal
+ * precondition; requiring one would make every specification without a
+ * governing ADR permanently ineligible.
+ */
+function traceabilityFindings(input: SpecEligibilityInput): SpecEligibilityFinding[] {
+  if (input.linkedRequirements.length > 0) return []
+
+  return [{
+    reason: SpecEligibilityReason.MISSING_TRACEABILITY,
+    message: 'the specification is not traced to any requirement',
+  }]
+}
+
+/**
  * Whether a Task currently has a specification an Execution Contract could
  * legitimately be derived from. Returns every applicable reason rather than
  * only the first, so a caller sees the whole picture in one pass.
@@ -651,6 +693,7 @@ export function evaluateSpecExecutionEligibility(input: SpecEligibilityInput): S
     })
   }
 
+  findings.push(...traceabilityFindings(input))
   findings.push(...staleTruthFindings(input))
 
   return { eligible: findings.length === 0, rulesVersion: SPEC_LIFECYCLE_VERSION, findings }

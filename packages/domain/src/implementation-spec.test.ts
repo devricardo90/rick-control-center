@@ -339,6 +339,10 @@ describe('canonical content serialization', () => {
 
 describe('execution eligibility', () => {
   const approvedAndValid = { status: ImplementationSpecStatus.APPROVED, contentValid: true }
+  // Traceability is a precondition of its own (MISSING_TRACEABILITY). Fixtures below
+  // supply one current requirement link so each test asserts the invariant it names
+  // instead of incidentally tripping the traceability rule.
+  const tracedToCurrentTruth = [{ id: 'req-current', status: 'ACTIVE' }] as const
 
   it('is eligible for an approved, valid specification traced to current truth', () => {
     const outcome = evaluateSpecExecutionEligibility({
@@ -368,7 +372,7 @@ describe('execution eligibility', () => {
   ])('blocks a %s specification with %s', (status, reason) => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: { status, contentValid: true },
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [],
     })
 
@@ -379,7 +383,7 @@ describe('execution eligibility', () => {
   it('blocks an approved specification whose stored body no longer validates', () => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: { status: ImplementationSpecStatus.APPROVED, contentValid: false },
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [],
     })
 
@@ -404,7 +408,7 @@ describe('execution eligibility', () => {
   it.each(['PROPOSED', 'REJECTED', 'SUPERSEDED'] as const)('blocks when a linked decision is %s', (status) => {
     const outcome = evaluateSpecExecutionEligibility({
       spec: approvedAndValid,
-      linkedRequirements: [],
+      linkedRequirements: tracedToCurrentTruth,
       linkedDecisions: [{ id: 'dec-1', status }],
     })
 
@@ -426,6 +430,18 @@ describe('execution eligibility', () => {
       SpecEligibilityReason.STALE_STRATEGIC_TRUTH,
       SpecEligibilityReason.STALE_STRATEGIC_TRUTH,
     ])
+  })
+
+  it('blocks an otherwise-perfect specification that is traced to nothing (GAP-03)', () => {
+    const outcome = evaluateSpecExecutionEligibility({
+      spec: approvedAndValid,
+      linkedRequirements: [],
+      linkedDecisions: [],
+    })
+
+    expect(outcome.eligible).toBe(false)
+    expect(outcome.findings.map(finding => finding.reason))
+      .toEqual([SpecEligibilityReason.MISSING_TRACEABILITY])
   })
 
   it('returns an identical outcome for identical input', () => {

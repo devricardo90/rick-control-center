@@ -960,12 +960,14 @@ describe('execution eligibility', () => {
 
   it('reports NOT_APPROVED for a task whose only specification is a draft', async () => {
     const { project, task } = await seedTask('elig-draft')
+    const truth = await seedStrategicTruth(project.id)
     await createImplementationSpec(client, {
       projectId: project.id,
       taskId: task.id,
       code: uniqueSlug('ric-spec-eligdraft'),
       version: '1.0.0',
       content: content(),
+      requirementIds: [truth.requirementId],
     })
 
     const outcome = await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)
@@ -994,6 +996,33 @@ describe('execution eligibility', () => {
     const outcome = await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)
 
     expect(outcome).toEqual({ eligible: true, rulesVersion: SPEC_LIFECYCLE_VERSION, findings: [] })
+  })
+
+  it('an approved specification persisted with no traceability links is not eligible (GAP-03)', async () => {
+    // The persistence path defaults absent traceability to an empty set, and
+    // createTraceLinks writes no rows for it. This proves the round trip does
+    // not manufacture eligibility out of that absence: the specification is
+    // APPROVED and its stored body is valid, so every other predicate passes
+    // and only the traceability rule stands between it and generation.
+    const { project, task } = await seedTask('elig-untraced')
+    const spec = await createImplementationSpec(client, {
+      projectId: project.id,
+      taskId: task.id,
+      code: uniqueSlug('ric-spec-eliguntraced'),
+      version: '1.0.0',
+      content: content(),
+    })
+    await approveImplementationSpec(client, {
+      projectId: project.id,
+      specId: spec.id,
+      approvedByOperatorId: await approverId(),
+    })
+
+    const outcome = await resolveImplementationSpecExecutionEligibility(client, project.id, task.id)
+
+    expect(outcome.eligible).toBe(false)
+    expect(outcome.findings.map(finding => finding.reason))
+      .toEqual([SpecEligibilityReason.MISSING_TRACEABILITY])
   })
 
   it('becomes stale when a traced requirement is superseded after approval', async () => {
@@ -1031,6 +1060,7 @@ describe('execution eligibility', () => {
   it('reports SUPERSEDED once the approved specification has been replaced and then retired again', async () => {
     const { project, task } = await seedTask('elig-superseded')
     const operatorId = await approverId()
+    const truth = await seedStrategicTruth(project.id)
     const code = uniqueSlug('ric-spec-eligsup')
     const first = await createImplementationSpec(client, {
       projectId: project.id,
@@ -1038,6 +1068,7 @@ describe('execution eligibility', () => {
       code,
       version: '1.0.0',
       content: content(),
+      requirementIds: [truth.requirementId],
     })
     await approveImplementationSpec(client, { projectId: project.id, specId: first.id, approvedByOperatorId: operatorId })
     const second = await reviseImplementationSpec(client, {
@@ -1045,6 +1076,7 @@ describe('execution eligibility', () => {
       code,
       version: '2.0.0',
       content: content(),
+      requirementIds: [truth.requirementId],
     })
     await approveImplementationSpec(client, {
       projectId: project.id,
@@ -1069,12 +1101,14 @@ describe('execution eligibility', () => {
 
   it('reports INVALID_CONTENT when an approved specification body is corrupted underneath it', async () => {
     const { project, task } = await seedTask('elig-corrupt')
+    const truth = await seedStrategicTruth(project.id)
     const spec = await createImplementationSpec(client, {
       projectId: project.id,
       taskId: task.id,
       code: uniqueSlug('ric-spec-eligcorrupt'),
       version: '1.0.0',
       content: content(),
+      requirementIds: [truth.requirementId],
     })
     await approveImplementationSpec(client, {
       projectId: project.id,
@@ -1319,10 +1353,14 @@ describe('eligibility consistency under concurrency', () => {
 
     const reasons = outcome.findings.map(finding => finding.reason)
 
-    // After the change the links are gone, so only the lifecycle finding
-    // remains; before it, nothing. A torn read could report a retired
-    // specification still carrying its old links, or a live one with none.
-    expect([CONSISTENT_BEFORE, [SpecEligibilityReason.SUPERSEDED]]).toContainEqual(reasons)
+    // After the change the specification is retired and its links are gone, so
+    // both the lifecycle and the traceability finding apply; before it, nothing.
+    // A torn read could report a retired specification still carrying its old
+    // links, or a live one with none — neither of which is a state that existed.
+    expect([
+      CONSISTENT_BEFORE,
+      [SpecEligibilityReason.SUPERSEDED, SpecEligibilityReason.MISSING_TRACEABILITY],
+    ]).toContainEqual(reasons)
   }, CONCURRENCY_TIMEOUT_MS)
 
   it('does not serialize eligibility of one project behind another project lock', async () => {
