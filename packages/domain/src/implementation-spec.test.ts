@@ -257,7 +257,10 @@ describe('canonical content serialization', () => {
   /** A rule-set version that is deliberately not the installed one, standing in for a specification authored under earlier rules. */
   const HISTORICAL_RULES = 'P1_038_V0'
   /** A rule-set version standing in for a future bump, so a test can prove an old specification is unaffected by one. */
-  const FUTURE_RULES = 'P1_038_V2'
+  // A rule set newer than the installed SPEC_LIFECYCLE_VERSION. It must stay
+  // strictly ahead of that constant: when the installed version is bumped, this
+  // moves with it, or the distinctness assertions below compare a value to itself.
+  const FUTURE_RULES = 'P1_038_V3'
 
   function canonical(rulesVersion: string, overrides: Partial<ImplementationSpecContentInput> = {}): string {
     return canonicalSpecContent({ rulesVersion, content: parsedContent(overrides) })

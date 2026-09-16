@@ -61,6 +61,11 @@ export const EXECUTION_CONTRACT_GENERATOR_VERSION = 'P0_041_V1' as const
 export const ContractGenerationRefusal = {
   /** The specification is not execution-eligible. Carries the eligibility findings verbatim. */
   SPEC_NOT_ELIGIBLE: 'SPEC_NOT_ELIGIBLE',
+  /**
+   * The eligibility outcome and the traceability supplied alongside it cannot
+   * both be true of the same specification. See `traceabilityIncoherence`.
+   */
+  INCOHERENT_TRACEABILITY: 'INCOHERENT_TRACEABILITY',
   /** The assembled contract did not satisfy the canonical P0-040 schema. */
   SCHEMA_INVALID: 'SCHEMA_INVALID',
 } as const
@@ -183,6 +188,65 @@ function mergeCompletionPolicy(
   return { ...supplied, requiredEvidenceIds: required }
 }
 
+/**
+ * Cross-checks the eligibility outcome against the traceability supplied with
+ * it, refusing input pairs that cannot both describe the same specification.
+ *
+ * ## Why this exists
+ *
+ * `SpecEligibilityOutcome` is `{ eligible, rulesVersion, findings }` — it names
+ * no specification and no links. A caller could therefore hand over a perfectly
+ * genuine positive outcome next to unrelated traceability, and the eligibility
+ * guard alone would wave it through: the P0-040 parser checks that traced
+ * requirements belong to the contract project, but places no cardinality
+ * requirement on them, so `requirements: []` parses. The result would be a
+ * schema-valid contract carrying no traceability at all — exactly the outcome
+ * GAP-03 exists to prevent, reached without forging anything.
+ *
+ * ## What this can prove, and what it cannot
+ *
+ * A positive outcome is only reachable when the evaluator saw at least one
+ * linked requirement, every linked requirement `ACTIVE`, and every linked
+ * decision `APPROVED`. Traceability that contradicts any of those cannot be the
+ * traceability that outcome was computed from, so the pair is rejected.
+ *
+ * It **cannot** prove set identity — that these are the *same* requirements the
+ * evaluator read, rather than a different set that happens to be active and in
+ * the right project. The outcome carries no identifiers to compare against.
+ * Closing that needs the eligibility result to name the links it examined, which
+ * is an identity-binding change to the P1-038 contract and is recorded as a
+ * mandatory P0-042 prerequisite rather than smuggled in here.
+ */
+function traceabilityIncoherence(input: ExecutionContractGenerationInput): string | null {
+  const { traceability, spec } = input
+
+  if (traceability.requirements.length === 0) {
+    return 'a positive eligibility outcome requires at least one traced requirement, but none was supplied'
+  }
+
+  const foreign = traceability.requirements.find(reference => reference.projectId !== spec.projectId)
+  if (foreign !== undefined) {
+    return `traced requirement '${foreign.requirementId}' belongs to project '${foreign.projectId}', not '${spec.projectId}'`
+  }
+
+  return strategicTruthIncoherence(input)
+}
+
+/** The status half of the cross-check, split out to keep each branch set small. */
+function strategicTruthIncoherence(input: ExecutionContractGenerationInput): string | null {
+  const staleRequirement = input.traceability.requirements.find(reference => reference.status !== 'ACTIVE')
+  if (staleRequirement !== undefined) {
+    return `traced requirement '${staleRequirement.requirementId}' is ${staleRequirement.status}, which a positive eligibility outcome excludes`
+  }
+
+  const staleDecision = input.traceability.decisions.find(reference => reference.status !== 'APPROVED')
+  if (staleDecision !== undefined) {
+    return `traced decision '${staleDecision.decisionId}' is ${staleDecision.status}, which a positive eligibility outcome excludes`
+  }
+
+  return null
+}
+
 function assemble(input: ExecutionContractGenerationInput): unknown {
   const { spec, identity, environment, traceability } = input
   const evidenceRequirements = deriveEvidenceRequirements(spec)
@@ -257,6 +321,15 @@ export function generateExecutionContract(
         message: 'the implementation specification is not execution-eligible',
         eligibility: input.eligibility,
       },
+    }
+  }
+
+  const incoherence = traceabilityIncoherence(input)
+
+  if (incoherence !== null) {
+    return {
+      ok: false,
+      failure: { refusal: ContractGenerationRefusal.INCOHERENT_TRACEABILITY, message: incoherence },
     }
   }
 

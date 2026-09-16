@@ -293,6 +293,114 @@ describe('P0-041 generation refuses unless the specification is eligible', () =>
   })
 })
 
+describe('traceability coherence is enforced at the generation boundary (PR #24 P1)', () => {
+  it('refuses a genuine positive eligibility paired with empty requirements', () => {
+    // The outcome is computed by the canonical evaluator and is legitimately
+    // positive. Nothing is forged. The traceability handed over alongside it
+    // simply is not the traceability it was computed from.
+    const result = generateExecutionContract({
+      ...generationInput(),
+      traceability: { requirements: [], decisions: [] },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected refusal')
+    expect(result.failure.refusal).toBe(ContractGenerationRefusal.INCOHERENT_TRACEABILITY)
+    expect(result.failure.message).toContain('at least one traced requirement')
+  })
+
+  it('accepts a genuine positive eligibility with coherent non-empty requirements', () => {
+    const result = generateExecutionContract(generationInput())
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.failure.message)
+    expect(result.contract.sourceSnapshot.requirements).toHaveLength(1)
+  })
+
+  it('refuses a traced requirement belonging to another project', () => {
+    const input = generationInput()
+    const result = generateExecutionContract({
+      ...input,
+      traceability: {
+        requirements: [{ requirementId: 'req-foreign', projectId: 'project-other', code: 'REQ-X', status: 'ACTIVE' }],
+        decisions: [],
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected refusal')
+    expect(result.failure.refusal).toBe(ContractGenerationRefusal.INCOHERENT_TRACEABILITY)
+    expect(result.failure.message).toContain('project-other')
+  })
+
+  it.each([
+    ['SUPERSEDED', 'SUPERSEDED'],
+    ['DRAFT', 'DRAFT'],
+  ])('refuses a traced requirement that is %s, which a positive outcome excludes', (_label, status) => {
+    const input = generationInput()
+    const result = generateExecutionContract({
+      ...input,
+      traceability: {
+        requirements: [{ requirementId: 'requirement-0', projectId: 'project-rcc', code: 'REQ-1', status }],
+        decisions: [],
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected refusal')
+    expect(result.failure.refusal).toBe(ContractGenerationRefusal.INCOHERENT_TRACEABILITY)
+  })
+
+  it('refuses a traced decision that is not APPROVED', () => {
+    const input = generationInput()
+    const result = generateExecutionContract({
+      ...input,
+      traceability: {
+        requirements: input.traceability.requirements,
+        decisions: [{ decisionId: 'dec-1', projectId: 'project-rcc', code: 'DEC-1', status: 'REJECTED' }],
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected refusal')
+    expect(result.failure.refusal).toBe(ContractGenerationRefusal.INCOHERENT_TRACEABILITY)
+  })
+
+  it('accepts a coherent APPROVED decision alongside the requirement', () => {
+    const input = generationInput()
+    const result = generateExecutionContract({
+      ...input,
+      traceability: {
+        requirements: input.traceability.requirements,
+        decisions: [{ decisionId: 'dec-1', projectId: 'project-rcc', code: 'DEC-1', status: 'APPROVED' }],
+      },
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('does not mutate the source inputs while rejecting an incoherent pair', () => {
+    const input = { ...generationInput(), traceability: { requirements: [], decisions: [] } }
+    const snapshot = structuredClone(input)
+
+    generateExecutionContract(input)
+
+    expect(input).toEqual(snapshot)
+  })
+
+  it('checks eligibility before coherence, so an ineligible spec reports the eligibility reason', () => {
+    const result = generateExecutionContract({
+      ...generationInput(),
+      eligibility: eligibilityWith(0),
+      traceability: { requirements: [], decisions: [] },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected refusal')
+    expect(result.failure.refusal).toBe(ContractGenerationRefusal.SPEC_NOT_ELIGIBLE)
+  })
+})
+
 describe('P0-041 generation output', () => {
   it('generates a contract conforming to the canonical P0-040 schema', () => {
     const result = generateExecutionContract(generationInput())

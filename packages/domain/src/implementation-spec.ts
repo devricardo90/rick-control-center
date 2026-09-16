@@ -53,7 +53,7 @@ import { DecisionStatus, RequirementStatus } from './strategic-truth.js'
  * recomputation would let a future bump silently rewrite the canonical
  * identity of specifications that were approved long before it.
  */
-export const SPEC_LIFECYCLE_VERSION = 'P1_038_V1' as const
+export const SPEC_LIFECYCLE_VERSION = 'P1_038_V2' as const
 
 /** Failure reasons are plain strings; the persistence layer wraps them in typed errors. */
 export type SpecValidation<T> = Result<T, string>
