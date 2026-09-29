@@ -14,9 +14,8 @@
  * So this generator splits its input in two, and the split is the point:
  *
  *   - **Derived** — computed deterministically from the specification:
- *     objectives, non-goals, the approved-specification identity reference, the
- *     strategic-truth references, and one evidence requirement per acceptance
- *     criterion.
+ *     objectives, non-goals, the exact eligibility binding and traceability
+ *     sets, and one evidence requirement per acceptance criterion.
  *   - **Supplied** — everything the specification cannot know: repository
  *     facts, scope paths, command/git/jira policy, retry, recovery, completion.
  *     These are *required* inputs. There are no defaults, because a default
@@ -25,19 +24,25 @@
  * Nothing is read from Git, the network, an LLM, or the environment. The same
  * input produces the same contract.
  *
- * ## Scope boundary
+ * ## Schema 2.0.0 (P0-042 / RIC-SPEC-NDERCC-39-001 §4-§5)
  *
- * P0-041 is generation only. Completeness evaluation (P0-042) and contract
- * hashing/versioning (P0-043) are deliberately absent: `contentHash` is emitted
- * as `null`, which is the schema's own "not yet sealed" value. The structural
- * check performed here is `parseExecutionContract` — the existing P0-040
- * schema — so generation cannot emit a contract the canonical parser rejects.
- * That is conformance to an existing schema, not a completeness gate.
+ * This governed generation path now emits schema 2.0.0 candidates, per the
+ * approved SDD: the exact eligibility binding and traceability sets §5
+ * requires are exactly what this module already has on hand (the eligibility
+ * outcome it is given, and the specification/traceability it derives from),
+ * so producing v1's looser reference shape here would be strictly less
+ * faithful to the same inputs. `contentHash` is still emitted as `null` —
+ * hashing/sealing remains P0-043 — and the structural check performed here is
+ * `parseExecutionContractV2`, so generation cannot emit a candidate the
+ * canonical v2 schema rejects. That is conformance to a schema, not a
+ * completeness or readiness gate: whether canonical state *currently agrees*
+ * with the binding produced here is `execution-contract-readiness.ts`'s
+ * question, evaluated separately against fresh database state.
  */
 import type {
   ExecutionActorKind,
-  ExecutionContract,
   ExecutionContractStatus,
+  ExecutionContractV2,
   ExecutionMode,
   ExecutionScope,
   ExecutionCommandPolicy,
@@ -49,10 +54,9 @@ import type {
   ExecutionRetryPolicy,
   ExecutionRiskAssessment,
   ExecutionSourceSnapshot,
-  SourceDecisionReference,
-  SourceRequirementReference,
+  ExecutionTraceabilityLink,
 } from './execution-contract.js'
-import { EXECUTION_CONTRACT_SCHEMA_VERSION, parseExecutionContract } from './execution-contract.js'
+import { EXECUTION_CONTRACT_SCHEMA_V2, parseExecutionContractV2 } from './execution-contract.js'
 import type { ImplementationSpecContent, SpecEligibilityOutcome } from './implementation-spec.js'
 
 export const EXECUTION_CONTRACT_GENERATOR_VERSION = 'P0_041_V1' as const
@@ -79,26 +83,41 @@ export interface ContractGenerationFailure {
 }
 
 export type ContractGenerationResult =
-  | { readonly ok: true, readonly contract: ExecutionContract }
+  | { readonly ok: true, readonly contract: ExecutionContractV2 }
   | { readonly ok: false, readonly failure: ContractGenerationFailure }
 
-/** The approved specification being derived from. `content` is the already-parsed body. */
+/**
+ * The approved specification being derived from. `content` is the
+ * already-parsed body. `contentHash`, `rulesVersion` and `status` are the
+ * specification's own persisted values (not recomputed here), carried
+ * through unchanged into the v2 eligibility binding so the binding can never
+ * disagree with the row it was actually read from.
+ */
 export interface GenerationSpecInput {
   readonly specId: string
   readonly projectId: string
   readonly lineageCode: string
   readonly version: string
+  readonly contentHash: string
+  readonly rulesVersion: string
+  readonly status: string
   readonly approvedByOperatorId: string
   readonly approvedAt: string
   readonly content: ImplementationSpecContent
 }
 
-/** Contract identity the caller assigns. Not derivable from a specification. */
+/**
+ * Contract identity the caller assigns. Not derivable from a specification.
+ * `evaluatedAt` is the eligibility-evaluation timestamp bound into
+ * `eligibilityBinding.evaluator` (§5.4) — supplied by the caller exactly like
+ * `createdAt`, since this module reads no clock.
+ */
 export interface GenerationIdentityInput {
   readonly contractId: string
   readonly sprintId: string
   readonly taskId: string
   readonly createdAt: string
+  readonly evaluatedAt: string
   readonly createdByKind: ExecutionActorKind
   readonly createdById: string
   readonly status: ExecutionContractStatus
@@ -121,10 +140,23 @@ export interface GenerationEnvironmentInput {
   readonly completionPolicy: ExecutionCompletionPolicy
 }
 
+/**
+ * One canonical traceability link, as the caller resolves it from the link
+ * tables. `freshnessToken` is opaque here too (see `ExecutionTraceabilityLink`)
+ * — the database boundary supplies the linked record's `updatedAt`.
+ */
+export interface GenerationTraceabilityLinkInput {
+  readonly targetId: string
+  readonly projectId: string
+  readonly linkType: string
+  readonly status: string
+  readonly freshnessToken: string
+}
+
 /** Strategic truth the specification is traced to, resolved by the caller from the link tables. */
 export interface GenerationTraceabilityInput {
-  readonly requirements: readonly SourceRequirementReference[]
-  readonly decisions: readonly SourceDecisionReference[]
+  readonly requirements: readonly GenerationTraceabilityLinkInput[]
+  readonly decisions: readonly GenerationTraceabilityLinkInput[]
 }
 
 export interface ExecutionContractGenerationInput {
@@ -164,7 +196,7 @@ function deriveEvidenceRequirements(spec: GenerationSpecInput): ExecutionEvidenc
   }))
 }
 
-function deriveObjectives(spec: GenerationSpecInput, taskId: string): ExecutionContract['objectives'] {
+function deriveObjectives(spec: GenerationSpecInput, taskId: string): ExecutionContractV2['objectives'] {
   return {
     productObjective: spec.content.title,
     phaseObjective: spec.content.behavior,
@@ -226,7 +258,7 @@ function traceabilityIncoherence(input: ExecutionContractGenerationInput): strin
 
   const foreign = traceability.requirements.find(reference => reference.projectId !== spec.projectId)
   if (foreign !== undefined) {
-    return `traced requirement '${foreign.requirementId}' belongs to project '${foreign.projectId}', not '${spec.projectId}'`
+    return `traced requirement '${foreign.targetId}' belongs to project '${foreign.projectId}', not '${spec.projectId}'`
   }
 
   return strategicTruthIncoherence(input)
@@ -236,26 +268,37 @@ function traceabilityIncoherence(input: ExecutionContractGenerationInput): strin
 function strategicTruthIncoherence(input: ExecutionContractGenerationInput): string | null {
   const staleRequirement = input.traceability.requirements.find(reference => reference.status !== 'ACTIVE')
   if (staleRequirement !== undefined) {
-    return `traced requirement '${staleRequirement.requirementId}' is ${staleRequirement.status}, which a positive eligibility outcome excludes`
+    return `traced requirement '${staleRequirement.targetId}' is ${staleRequirement.status}, which a positive eligibility outcome excludes`
   }
 
   const staleDecision = input.traceability.decisions.find(reference => reference.status !== 'APPROVED')
   if (staleDecision !== undefined) {
-    return `traced decision '${staleDecision.decisionId}' is ${staleDecision.status}, which a positive eligibility outcome excludes`
+    return `traced decision '${staleDecision.targetId}' is ${staleDecision.status}, which a positive eligibility outcome excludes`
   }
 
   return null
 }
 
+/** `GenerationTraceabilityLinkInput` -> the persisted `ExecutionTraceabilityLink` shape. `linkId` is derived from the type and target rather than supplied, since it names nothing the caller could get wrong. */
+function toTraceabilityLink(linkType: string, reference: GenerationTraceabilityLinkInput): ExecutionTraceabilityLink {
+  return {
+    linkId: `${linkType}:${reference.targetId}`,
+    linkType,
+    targetId: reference.targetId,
+    status: reference.status,
+    freshnessToken: reference.freshnessToken,
+  }
+}
+
 function assemble(input: ExecutionContractGenerationInput): unknown {
-  const { spec, identity, environment, traceability } = input
+  const { spec, identity, environment, traceability, eligibility } = input
   const evidenceRequirements = deriveEvidenceRequirements(spec)
   const evidenceIds = evidenceRequirements.map(requirement => requirement.evidenceId)
 
   return {
     identity: {
       contractId: identity.contractId,
-      contractVersion: EXECUTION_CONTRACT_SCHEMA_VERSION,
+      contractVersion: EXECUTION_CONTRACT_SCHEMA_V2,
       projectId: spec.projectId,
       sprintId: identity.sprintId,
       taskIds: [identity.taskId],
@@ -265,20 +308,35 @@ function assemble(input: ExecutionContractGenerationInput): unknown {
       // P0-043 owns sealing. `null` is the schema's own "not yet hashed" value.
       contentHash: null,
       status: identity.status,
-      approvedImplementationSpec: {
-        specId: spec.specId,
-        projectId: spec.projectId,
-        lineageCode: spec.lineageCode,
-        version: spec.version,
-        approvedByOperatorId: spec.approvedByOperatorId,
-        approvedAt: spec.approvedAt,
+    },
+    eligibilityBinding: {
+      projectId: spec.projectId,
+      taskId: identity.taskId,
+      sprintId: identity.sprintId,
+      specId: spec.specId,
+      lineageCode: spec.lineageCode,
+      specVersion: spec.version,
+      contentHash: spec.contentHash,
+      rulesVersion: spec.rulesVersion,
+      specStatus: spec.status,
+      approvedByOperatorId: spec.approvedByOperatorId,
+      approvedAt: spec.approvedAt,
+      evaluator: {
+        // The eligibility-evaluating code's own identity/version — a module
+        // constant, not a caller claim (§5.4). `rulesVersion` here is the
+        // *eligibility* rule set actually used, taken from the outcome being
+        // bound rather than re-asserted by the caller.
+        evaluatorName: 'execution-contract-generation',
+        evaluatorVersion: EXECUTION_CONTRACT_GENERATOR_VERSION,
+        rulesVersion: eligibility.rulesVersion,
+        evaluatedAt: identity.evaluatedAt,
       },
     },
-    sourceSnapshot: {
-      ...environment.sourceSnapshot,
-      requirements: traceability.requirements,
-      decisions: traceability.decisions,
+    traceability: {
+      requirements: traceability.requirements.map(reference => toTraceabilityLink('REQUIREMENT', reference)),
+      decisions: traceability.decisions.map(reference => toTraceabilityLink('DECISION', reference)),
     },
+    sourceSnapshot: environment.sourceSnapshot,
     objectives: deriveObjectives(spec, identity.taskId),
     scope: environment.scope,
     executionMode: environment.executionMode,
@@ -303,12 +361,16 @@ function assemble(input: ExecutionContractGenerationInput): unknown {
 }
 
 /**
- * Generates a canonical Execution Contract from an eligible Implementation Spec.
+ * Generates a canonical schema 2.0.0 Execution Contract candidate from an
+ * eligible Implementation Spec.
  *
  * Fail-closed twice over: it refuses when the supplied eligibility decision is
  * negative, and again when the assembled document does not satisfy the
- * canonical P0-040 parser. It never mutates its input, performs no I/O, and
- * consults no clock or random source — `createdAt` is supplied, not read.
+ * canonical v2 parser. It never mutates its input, performs no I/O, and
+ * consults no clock or random source — `createdAt`/`evaluatedAt` are supplied,
+ * not read. The candidate it returns carries no readiness verdict: whether
+ * canonical state currently agrees with the binding is decided separately, by
+ * `execution-contract-readiness.ts` against fresh database state.
  */
 export function generateExecutionContract(
   input: ExecutionContractGenerationInput,
@@ -333,7 +395,7 @@ export function generateExecutionContract(
     }
   }
 
-  const parsed = parseExecutionContract(assemble(input))
+  const parsed = parseExecutionContractV2(assemble(input))
 
   if (!parsed.ok) {
     return {

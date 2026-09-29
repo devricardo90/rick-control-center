@@ -236,6 +236,7 @@ export {
   approveImplementationSpec,
   createImplementationSpec,
   findApprovedImplementationSpecForTask,
+  findGoverningSpecForTask,
   findImplementationSpecForProject,
   listImplementationSpecDecisionIds,
   listImplementationSpecLineage,
@@ -343,9 +344,30 @@ export type {
 
 // ── Execution Contract schema (NDERCC-37 / RIC-S3-02 / P0-040) ─────────────
 //
-// Types only: P0-040 defines the persistence shape. Contract generation,
-// completeness/readiness and hashing/versioning remain later tasks.
+// Types only: P0-040 defines the persistence shape. Contract generation and
+// hashing/versioning remain separate tasks (P0-041 generates; P0-043 seals).
 export type {
   PersistedExecutionContract,
   PersistedExecutionContractTask,
 } from './execution-contract.js'
+
+// ── Execution Contract readiness (NDERCC-39 / RIC-S3-04 / P0-042) ──────────
+//
+// The transaction-scoped resolver is the gate; the plain
+// `resolveExecutionContractReadiness` is a read-only projection — the same
+// relationship the specification-eligibility resolver above has to its own
+// transaction-scoped counterpart, and for the same reason: a caller granting
+// any authority on this answer must call the transaction-scoped function
+// inside its own writing transaction, so the check and the write cannot be
+// separated. Nothing here persists a contract or a verdict, activates the
+// Execution Contract, or authorizes implementation — see `authorityBoundary`
+// in the governing SDD.
+export type {
+  ClaimedExecutionContractBinding,
+  ClaimedTraceabilityLink,
+  ExecutionContractReadinessClaim,
+} from './execution-contract-readiness.js'
+export {
+  resolveExecutionContractReadiness,
+  resolveExecutionContractReadinessInTransaction,
+} from './execution-contract-readiness.js'

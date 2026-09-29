@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  EXECUTION_CONTRACT_SCHEMA_V2,
   EXECUTION_CONTRACT_SCHEMA_VERSION,
   ExecutionContractStatus,
   ExecutionMode,
   parseExecutionContract,
+  parseExecutionContractByVersion,
+  parseExecutionContractV2,
   serializeExecutionContract,
 } from './execution-contract.js'
-import type { ExecutionContract, ExecutionContractValidation } from './execution-contract.js'
+import type { ExecutionContract, ExecutionContractV2, ExecutionContractValidation } from './execution-contract.js'
 
 type ContractFixture = {
   [key: string]: unknown
@@ -312,5 +315,145 @@ describe('canonical Execution Contract schema', () => {
 
     expect(secondParsed.ok).toBe(true)
     expect(secondParsed.ok && serializeExecutionContract(secondParsed.value)).not.toBe(serializeExecutionContract(contract))
+  })
+})
+
+// ── Schema 2.0.0 (P0-042) ──────────────────────────────────────────────────────
+
+function validContractV2(): Record<string, unknown> {
+  const v1 = validContract()
+  return {
+    identity: {
+      contractId: 'RIC-EC-NDERCC-39-001-v2.0.0',
+      contractVersion: EXECUTION_CONTRACT_SCHEMA_V2,
+      projectId: 'project-rcc',
+      sprintId: 'sprint-3',
+      taskIds: ['NDERCC-39'],
+      createdAt: '2026-09-28T10:00:00.000Z',
+      createdBy: { kind: 'AGENT', id: 'p0-042' },
+      sourceSnapshotId: 'snapshot-1',
+      contentHash: null,
+      status: ExecutionContractStatus.DRAFT,
+    },
+    eligibilityBinding: {
+      projectId: 'project-rcc',
+      taskId: 'NDERCC-39',
+      sprintId: 'sprint-3',
+      specId: 'spec-1',
+      lineageCode: 'RIC-SPEC-NDERCC-39-001',
+      specVersion: '1.0.0',
+      contentHash: 'content-hash-1',
+      rulesVersion: 'P1_038_V2',
+      specStatus: 'APPROVED',
+      approvedByOperatorId: 'operator-1',
+      approvedAt: '2026-09-18T09:00:00.000Z',
+      evaluator: {
+        evaluatorName: 'execution-contract-generation',
+        evaluatorVersion: 'P0_041_V1',
+        rulesVersion: 'P1_038_V2',
+        evaluatedAt: '2026-09-28T10:00:00.000Z',
+      },
+    },
+    traceability: {
+      requirements: [{ linkId: 'REQUIREMENT:req-1', linkType: 'REQUIREMENT', targetId: 'req-1', status: 'ACTIVE', freshnessToken: '2026-09-01T00:00:00.000Z' }],
+      decisions: [],
+    },
+    sourceSnapshot: v1.sourceSnapshot,
+    objectives: v1.objectives,
+    scope: v1.scope,
+    executionMode: v1.executionMode,
+    agents: v1.agents,
+    preconditions: v1.preconditions,
+    workUnits: v1.workUnits,
+    commandPolicy: v1.commandPolicy,
+    riskAssessment: v1.riskAssessment,
+    validations: v1.validations,
+    evidenceRequirements: v1.evidenceRequirements,
+    approvalGates: v1.approvalGates,
+    gitPolicy: v1.gitPolicy,
+    jiraPolicy: v1.jiraPolicy,
+    retryPolicy: v1.retryPolicy,
+    recoveryPolicy: v1.recoveryPolicy,
+    completionPolicy: v1.completionPolicy,
+    signatures: v1.signatures,
+  }
+}
+
+function parsedV2Fixture(): ExecutionContractV2 {
+  const parsed = parseExecutionContractV2(validContractV2())
+  if (!parsed.ok) throw new Error(parsed.error)
+  return parsed.value
+}
+
+describe('schema 2.0.0 (AC-09 structural validation)', () => {
+  it('accepts the complete v2 structural shape', () => {
+    const parsed = parseExecutionContractV2(validContractV2())
+    expect(parsed.ok).toBe(true)
+  })
+
+  it('rejects a contractVersion that does not equal 2.0.0', () => {
+    const input = validContractV2()
+    const identity = input.identity as Record<string, unknown>
+    const failure = rejection(parseExecutionContractV2({ ...input, identity: { ...identity, contractVersion: '2.1.0' } }))
+    expect(failure.path).toBe('contract.identity.contractVersion')
+  })
+
+  it('rejects a traceability set with zero requirement links', () => {
+    const input = validContractV2()
+    const failure = rejection(parseExecutionContractV2({ ...input, traceability: { requirements: [], decisions: [] } }))
+    expect(failure.reason).toContain('at least one link')
+  })
+
+  it('rejects an eligibilityBinding.projectId that disagrees with identity.projectId', () => {
+    const input = validContractV2()
+    const binding = input.eligibilityBinding as Record<string, unknown>
+    const failure = rejection(parseExecutionContractV2({ ...input, eligibilityBinding: { ...binding, projectId: 'project-other' } }))
+    expect(failure.reason).toContain('must equal contract.identity.projectId')
+  })
+
+  it('rejects a missing required v2 field (eligibilityBinding) without fabricating one', () => {
+    const input = validContractV2() as Record<string, unknown>
+    delete input.eligibilityBinding
+    const failure = rejection(parseExecutionContractV2(input))
+    expect(failure.path).toBe('contract.eligibilityBinding')
+  })
+
+  it('rejects an unknown v2 top-level field the same way v1 does', () => {
+    const failure = rejection(parseExecutionContractV2({ ...validContractV2(), unknownField: true }))
+    expect(failure.reason).toBe('contains unsupported field unknownField')
+  })
+
+  it('preserves ordered traceability link identity independent of array order', () => {
+    const contract = parsedV2Fixture()
+    expect(contract.traceability.requirements[0]?.linkId).toBe('REQUIREMENT:req-1')
+  })
+})
+
+describe('version dispatch (§4.2/§4.3): v1 read-only, v2 authoritative, unknown fails closed', () => {
+  it('dispatches a 1.x contract to the unmodified v1 parser', () => {
+    const dispatched = parseExecutionContractByVersion(validContract())
+    expect(dispatched.ok).toBe(true)
+    if (!dispatched.ok) throw new Error(dispatched.error)
+    expect(dispatched.value.schema).toBe('1.0')
+  })
+
+  it('dispatches an exact 2.0.0 contract to the v2 parser', () => {
+    const dispatched = parseExecutionContractByVersion(validContractV2())
+    expect(dispatched.ok).toBe(true)
+    if (!dispatched.ok) throw new Error(dispatched.error)
+    expect(dispatched.value.schema).toBe('2.0')
+  })
+
+  it('fails closed on an unknown schema version rather than guessing or migrating', () => {
+    const input = validContractV2()
+    const identity = input.identity as Record<string, unknown>
+    const failure = rejection(parseExecutionContractByVersion({ ...input, identity: { ...identity, contractVersion: '3.0.0' } }))
+    expect(failure.reason).toContain('not a supported schema version')
+  })
+
+  it('never migrates a v1 contract into a v2 shape', () => {
+    const dispatched = parseExecutionContractByVersion(validContract())
+    if (!dispatched.ok || dispatched.value.schema !== '1.0') throw new Error('expected a v1 dispatch')
+    expect('eligibilityBinding' in dispatched.value.contract).toBe(false)
   })
 })
