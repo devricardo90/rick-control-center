@@ -18,7 +18,8 @@ function policy(): ExecutionAuthorizationPolicy {
   return {
     workspaceId: 'workspace-1',
     projectId: 'project-rcc',
-    allowedCommands: [{ commandId: 'run-tests', executable: 'pnpm' }],
+    allowedCommands: [{ commandId: 'run-tests', executable: 'pnpm', args: ['test'] }],
+    allowedWorkingDirectories: ['packages/domain'],
     allowedPaths: [{ path: 'packages/domain/src', accessMode: PathAccessMode.READ }],
     deniedPaths: [{ path: 'packages/domain/src/secrets.ts', accessMode: PathAccessMode.WRITE }],
   }
@@ -92,6 +93,88 @@ describe('layer B: pure deterministic authorization', () => {
     const outcome = authorizeExecutionCommand({ ...request(), command: { commandId: 'rm', executable: 'rm', args: [] } }, policy())
     expect(outcome.decision).toBe(AuthorizationDecision.DENY)
     expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNLISTED_COMMAND)
+  })
+
+  describe('argument vector is bound exactly, not by prefix/substring (finding 1)', () => {
+    it('allows the exact authorized argument vector', () => {
+      const outcome = authorizeExecutionCommand(request(), policy())
+      expect(outcome.decision).toBe(AuthorizationDecision.ALLOW)
+    })
+
+    it('denies a different argument in the same position', () => {
+      const outcome = authorizeExecutionCommand(
+        { ...request(), command: { ...request().command, args: ['publish'] } },
+        policy(),
+      )
+      expect(outcome.decision).toBe(AuthorizationDecision.DENY)
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNAUTHORIZED_ARGUMENTS)
+    })
+
+    it('denies an additional argument appended to an otherwise-authorized vector', () => {
+      const outcome = authorizeExecutionCommand(
+        { ...request(), command: { ...request().command, args: ['test', '--force'] } },
+        policy(),
+      )
+      expect(outcome.decision).toBe(AuthorizationDecision.DENY)
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNAUTHORIZED_ARGUMENTS)
+    })
+
+    it('denies a missing argument from an otherwise-authorized vector', () => {
+      const multiArgPolicy: ExecutionAuthorizationPolicy = {
+        ...policy(),
+        allowedCommands: [{ commandId: 'run-tests', executable: 'pnpm', args: ['test', '--run'] }],
+      }
+      const outcome = authorizeExecutionCommand(
+        { ...request(), command: { ...request().command, args: ['test'] } },
+        multiArgPolicy,
+      )
+      expect(outcome.decision).toBe(AuthorizationDecision.DENY)
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNAUTHORIZED_ARGUMENTS)
+    })
+
+    it('denies the same arguments in a different order, because order changes command semantics', () => {
+      const multiArgPolicy: ExecutionAuthorizationPolicy = {
+        ...policy(),
+        allowedCommands: [{ commandId: 'run-tests', executable: 'pnpm', args: ['--filter', '@rick/domain', 'test'] }],
+      }
+      const outcome = authorizeExecutionCommand(
+        { ...request(), command: { ...request().command, args: ['test', '--filter', '@rick/domain'] } },
+        multiArgPolicy,
+      )
+      expect(outcome.decision).toBe(AuthorizationDecision.DENY)
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNAUTHORIZED_ARGUMENTS)
+    })
+
+    it('still denies via UNLISTED_COMMAND, not UNAUTHORIZED_ARGUMENTS, when the identity itself is unlisted', () => {
+      const outcome = authorizeExecutionCommand(
+        { ...request(), command: { commandId: 'publish', executable: 'pnpm', args: ['test'] } },
+        policy(),
+      )
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNLISTED_COMMAND)
+    })
+  })
+
+  describe('working directory is authorized explicitly (finding 2)', () => {
+    it('allows a request from an authorized working directory', () => {
+      const outcome = authorizeExecutionCommand(request(), policy())
+      expect(outcome.decision).toBe(AuthorizationDecision.ALLOW)
+    })
+
+    it('denies a lexically valid but unauthorized working directory', () => {
+      const outcome = authorizeExecutionCommand({ ...request(), workingDirectory: 'packages/database' }, policy())
+      expect(outcome.decision).toBe(AuthorizationDecision.DENY)
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.UNAUTHORIZED_WORKING_DIRECTORY)
+    })
+
+    it('a workspace mismatch is still reported as WORKSPACE_MISMATCH, not UNAUTHORIZED_WORKING_DIRECTORY', () => {
+      const outcome = authorizeExecutionCommand({ ...request(), workspaceId: 'other-workspace' }, policy())
+      expect(outcome.reasonCode).toBe(AuthorizationReasonCode.WORKSPACE_MISMATCH)
+    })
+
+    it('a malformed working directory is rejected at structural validation, before authorization ever runs', () => {
+      const malformed = { ...request(), workingDirectory: '../escape' }
+      expect(parseExecutionCommandRequest(malformed).ok).toBe(false)
+    })
   })
 
   it('denies a workspace mismatch', () => {

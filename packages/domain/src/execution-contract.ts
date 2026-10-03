@@ -907,6 +907,27 @@ function checkTopLevel(input: UnknownRecord): ExecutionContractValidation<void> 
   return unexpected === undefined ? ok(undefined) : err(`contract contains unsupported field ${unexpected}`)
 }
 
+/**
+ * Shared between v1 and v2: every `objectives.taskObjectives[].taskId` must
+ * belong to the contract's own `taskIds`, and no task may be named twice.
+ * Extracted so v1 and v2 can never silently diverge on what is, in both
+ * schemas, the same invariant.
+ */
+function validateTaskObjectiveReferences(
+  taskIds: readonly string[],
+  contractObjectives: ExecutionObjectives,
+): ExecutionContractValidation<void> {
+  const taskIdSet = new Set(taskIds)
+  const objectiveTaskIds = contractObjectives.taskObjectives.map(objective => objective.taskId)
+  if (objectiveTaskIds.some(taskId => !taskIdSet.has(taskId))) {
+    return err('contract.objectives.taskObjectives must reference contract.identity.taskIds')
+  }
+  if (new Set(objectiveTaskIds).size !== objectiveTaskIds.length) {
+    return err('contract.objectives.taskObjectives must not contain duplicate task IDs')
+  }
+  return ok(undefined)
+}
+
 function validateCrossReferences(
   contractIdentity: ExecutionContractIdentity,
   sourceSnapshotValue: ExecutionSourceSnapshot,
@@ -918,14 +939,8 @@ function validateCrossReferences(
   if (contractIdentity.sourceSnapshotId !== sourceSnapshotValue.snapshotId) {
     return err('contract.identity.sourceSnapshotId must equal contract.sourceSnapshot.snapshotId')
   }
-  const taskIds = new Set(contractIdentity.taskIds)
-  const objectiveTaskIds = contractObjectives.taskObjectives.map(objective => objective.taskId)
-  if (objectiveTaskIds.some(taskId => !taskIds.has(taskId))) {
-    return err('contract.objectives.taskObjectives must reference contract.identity.taskIds')
-  }
-  if (new Set(objectiveTaskIds).size !== objectiveTaskIds.length) {
-    return err('contract.objectives.taskObjectives must not contain duplicate task IDs')
-  }
+  const objectiveReferences = validateTaskObjectiveReferences(contractIdentity.taskIds, contractObjectives)
+  if (!objectiveReferences.ok) return objectiveReferences
   if (sourceSnapshotValue.requirements.some(requirement => requirement.projectId !== contractIdentity.projectId)) {
     return err('contract.sourceSnapshot.requirements must belong to contract.identity.projectId')
   }
@@ -1124,8 +1139,23 @@ export interface ExecutionContractV2 {
   readonly signatures: readonly ExecutionSignature[]
 }
 
+/** `evaluatedAt` is a timestamp, not free text — validated the same way as `identity.createdAt`, so a malformed value fails parsing instead of being silently accepted as any non-empty string. */
 function evaluatorProvenance(value: unknown, path: string): ExecutionContractValidation<ExecutionEvaluatorProvenance> {
-  return stringFields(value, path, ['evaluatorName', 'evaluatorVersion', 'rulesVersion', 'evaluatedAt'] as const)
+  const input = record(value, path)
+  if (!input.ok) return input
+  const fields = ['evaluatorName', 'evaluatorVersion', 'rulesVersion', 'evaluatedAt']
+  for (const field of fields) {
+    const present = valueAt(input.value, field, path)
+    if (!present.ok) return present
+  }
+  const parsed = parseAll(
+    text(input.value.evaluatorName, `${path}.evaluatorName`),
+    text(input.value.evaluatorVersion, `${path}.evaluatorVersion`),
+    text(input.value.rulesVersion, `${path}.rulesVersion`),
+    isoTimestamp(input.value.evaluatedAt, `${path}.evaluatedAt`),
+  )
+  if (!parsed.ok) return parsed
+  return ok({ evaluatorName: parsed.value[0], evaluatorVersion: parsed.value[1], rulesVersion: parsed.value[2], evaluatedAt: parsed.value[3] })
 }
 
 function traceabilityLink(value: unknown, path: string): ExecutionContractValidation<ExecutionTraceabilityLink> {
@@ -1153,19 +1183,22 @@ const ELIGIBILITY_BINDING_TEXT_FIELDS = [
   'rulesVersion',
   'specStatus',
   'approvedByOperatorId',
-  'approvedAt',
 ] as const
 
+/** `approvedAt` is a timestamp, validated the same way as `identity.createdAt` and `evaluator.evaluatedAt` — not part of the plain-text field list above. */
 function eligibilityBindingV2(value: unknown, path: string): ExecutionContractValidation<ExecutionEligibilityBindingV2> {
   const input = record(value, path)
   if (!input.ok) return input
   const evaluatorField = valueAt(input.value, 'evaluator', path)
   if (!evaluatorField.ok) return evaluatorField
+  const approvedAtField = valueAt(input.value, 'approvedAt', path)
+  if (!approvedAtField.ok) return approvedAtField
   const fields = stringFields(input.value, path, ELIGIBILITY_BINDING_TEXT_FIELDS)
+  const approvedAt = isoTimestamp(validated(approvedAtField), `${path}.approvedAt`)
   const evaluator = evaluatorProvenance(validated(evaluatorField), `${path}.evaluator`)
-  const parsed = parseAll(fields, evaluator)
+  const parsed = parseAll(fields, approvedAt, evaluator)
   if (!parsed.ok) return parsed
-  return ok({ ...parsed.value[0], evaluator: parsed.value[1] })
+  return ok({ ...parsed.value[0], approvedAt: parsed.value[1], evaluator: parsed.value[2] })
 }
 
 function requireExactContractVersion(value: unknown, path: string): ExecutionContractValidation<string> {
@@ -1233,6 +1266,7 @@ function validateCrossReferencesV2(
   contractIdentity: ExecutionContractIdentityV2,
   binding: ExecutionEligibilityBindingV2,
   sourceSnapshotValue: Omit<ExecutionSourceSnapshot, 'requirements' | 'decisions'>,
+  contractObjectives: ExecutionObjectives,
 ): ExecutionContractValidation<void> {
   if (contractIdentity.projectId !== binding.projectId) {
     return err('contract.eligibilityBinding.projectId must equal contract.identity.projectId')
@@ -1240,9 +1274,17 @@ function validateCrossReferencesV2(
   if (!contractIdentity.taskIds.includes(binding.taskId)) {
     return err('contract.eligibilityBinding.taskId must be one of contract.identity.taskIds')
   }
+  // AC-04 names sprint as an exact-bound identity field; identity.sprintId and
+  // eligibilityBinding.sprintId are two representations of that one fact and
+  // must never be allowed to diverge within a single contract.
+  if (contractIdentity.sprintId !== binding.sprintId) {
+    return err('contract.eligibilityBinding.sprintId must equal contract.identity.sprintId')
+  }
   if (contractIdentity.sourceSnapshotId !== sourceSnapshotValue.snapshotId) {
     return err('contract.identity.sourceSnapshotId must equal contract.sourceSnapshot.snapshotId')
   }
+  const objectiveReferences = validateTaskObjectiveReferences(contractIdentity.taskIds, contractObjectives)
+  if (!objectiveReferences.ok) return objectiveReferences
   return ok(undefined)
 }
 
@@ -1286,7 +1328,7 @@ export function parseExecutionContractV2(input: unknown): ExecutionContractValid
   if (!parsed.ok) return parsed
   const notEmpty = validateTraceabilityNotEmpty(parsed.value[2])
   if (!notEmpty.ok) return notEmpty
-  const crossReferences = validateCrossReferencesV2(parsed.value[0], parsed.value[1], parsed.value[3])
+  const crossReferences = validateCrossReferencesV2(parsed.value[0], parsed.value[1], parsed.value[3], parsed.value[4])
   if (!crossReferences.ok) return crossReferences
   return ok({
     identity: parsed.value[0],

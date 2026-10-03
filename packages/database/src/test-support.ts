@@ -113,3 +113,20 @@ export function createP042TestClient(): PrismaClient {
   const adapter = new PrismaPg({ connectionString: verifiedUrl })
   return new PrismaClient({ adapter })
 }
+
+/**
+ * Identical to `createP042TestClient`, except the underlying pool is pinned
+ * to exactly one physical connection (`max: 1`). Its Postgres backend pid is
+ * therefore stable for the client's entire lifetime — every query it ever
+ * issues, including ones a canonical writer API runs internally inside its
+ * own transaction, necessarily executes on that same single backend. AC-11's
+ * lock-contention tests use this for their WRITER participant so a
+ * concurrent-locking check can identify contention attributable specifically
+ * to that exact backend, rather than merely "some backend is blocked by the
+ * reader" (RIC-SPEC-NDERCC-39-001 §6, AC-11 writer identification).
+ */
+export function createP042SingleConnectionTestClient(): PrismaClient {
+  const verifiedUrl = requireIsolatedP042DatabaseUrl(requireTestDatabaseUrl())
+  const adapter = new PrismaPg({ connectionString: verifiedUrl, max: 1 })
+  return new PrismaClient({ adapter })
+}

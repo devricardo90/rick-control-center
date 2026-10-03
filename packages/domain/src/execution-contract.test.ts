@@ -359,7 +359,10 @@ function validContractV2(): Record<string, unknown> {
       decisions: [],
     },
     sourceSnapshot: v1.sourceSnapshot,
-    objectives: v1.objectives,
+    objectives: {
+      ...(v1.objectives as Record<string, unknown>),
+      taskObjectives: [{ taskId: 'NDERCC-39', objective: 'Validate execution contract readiness.' }],
+    },
     scope: v1.scope,
     executionMode: v1.executionMode,
     agents: v1.agents,
@@ -426,6 +429,73 @@ describe('schema 2.0.0 (AC-09 structural validation)', () => {
   it('preserves ordered traceability link identity independent of array order', () => {
     const contract = parsedV2Fixture()
     expect(contract.traceability.requirements[0]?.linkId).toBe('REQUIREMENT:req-1')
+  })
+
+  describe('eligibilityBinding.sprintId is bound to identity.sprintId (finding 4)', () => {
+    it('rejects an eligibilityBinding.sprintId that disagrees with identity.sprintId', () => {
+      const input = validContractV2()
+      const binding = input.eligibilityBinding as Record<string, unknown>
+      const failure = rejection(parseExecutionContractV2({ ...input, eligibilityBinding: { ...binding, sprintId: 'sprint-other' } }))
+      expect(failure.reason).toContain('must equal contract.identity.sprintId')
+    })
+
+    it('accepts a matching eligibilityBinding.sprintId', () => {
+      const parsed = parseExecutionContractV2(validContractV2())
+      expect(parsed.ok).toBe(true)
+    })
+  })
+
+  describe('objectives.taskObjectives are cross-referenced against identity.taskIds (finding 5)', () => {
+    it('rejects a taskObjective referencing a task ID absent from identity.taskIds', () => {
+      const input = validContractV2() as Record<string, unknown>
+      const objectives = input.objectives as Record<string, unknown>
+      const failure = rejection(parseExecutionContractV2({
+        ...input,
+        objectives: { ...objectives, taskObjectives: [{ taskId: 'NDERCC-UNKNOWN', objective: 'Unbound.' }] },
+      }))
+      expect(failure.reason).toContain('must reference contract.identity.taskIds')
+    })
+
+    it('rejects duplicate task IDs within objectives.taskObjectives', () => {
+      const input = validContractV2() as Record<string, unknown>
+      const objectives = input.objectives as Record<string, unknown>
+      const failure = rejection(parseExecutionContractV2({
+        ...input,
+        objectives: {
+          ...objectives,
+          taskObjectives: [
+            { taskId: 'NDERCC-39', objective: 'First.' },
+            { taskId: 'NDERCC-39', objective: 'Duplicate.' },
+          ],
+        },
+      }))
+      expect(failure.reason).toContain('duplicate task IDs')
+    })
+  })
+
+  describe('evaluator.evaluatedAt and eligibilityBinding.approvedAt are validated as timestamps, not arbitrary strings (finding 6)', () => {
+    it('rejects a non-ISO evaluator.evaluatedAt', () => {
+      const input = validContractV2()
+      const binding = input.eligibilityBinding as Record<string, unknown>
+      const evaluator = binding.evaluator as Record<string, unknown>
+      const failure = rejection(parseExecutionContractV2({
+        ...input,
+        eligibilityBinding: { ...binding, evaluator: { ...evaluator, evaluatedAt: 'not-a-date' } },
+      }))
+      expect(failure.path).toBe('contract.eligibilityBinding.evaluator.evaluatedAt')
+    })
+
+    it('rejects a non-ISO eligibilityBinding.approvedAt', () => {
+      const input = validContractV2()
+      const binding = input.eligibilityBinding as Record<string, unknown>
+      const failure = rejection(parseExecutionContractV2({ ...input, eligibilityBinding: { ...binding, approvedAt: 'not-a-date' } }))
+      expect(failure.path).toBe('contract.eligibilityBinding.approvedAt')
+    })
+
+    it('accepts valid ISO timestamps for both evaluatedAt and approvedAt', () => {
+      const parsed = parseExecutionContractV2(validContractV2())
+      expect(parsed.ok).toBe(true)
+    })
   })
 })
 

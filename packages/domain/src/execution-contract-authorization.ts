@@ -59,10 +59,26 @@ export interface ExecutionCommandRequest {
   readonly paths: readonly ExecutionPathOperation[]
 }
 
+/**
+ * An authorized command identity, bound to its exact argument vector. `args`
+ * is matched by exact sequence equality — same length, same order, same
+ * values — never by prefix or substring: `args` is what the command
+ * actually does, so authorizing `['test']` must not authorize `['publish',
+ * '--force']` or `['test', '--force']` just because `commandId`/`executable`
+ * match.
+ */
+export interface ExecutionAuthorizedCommand {
+  readonly commandId: string
+  readonly executable: string
+  readonly args: readonly string[]
+}
+
 export interface ExecutionAuthorizationPolicy {
   readonly workspaceId: string
   readonly projectId: string
-  readonly allowedCommands: readonly { readonly commandId: string, readonly executable: string }[]
+  readonly allowedCommands: readonly ExecutionAuthorizedCommand[]
+  /** Workspace-relative working directories a request may run from. Exact membership, not a prefix/glob. */
+  readonly allowedWorkingDirectories: readonly string[]
   readonly allowedPaths: readonly ExecutionPathOperation[]
   /** An explicit deny always overrides a matching allow, regardless of declaration order. */
   readonly deniedPaths: readonly ExecutionPathOperation[]
@@ -78,6 +94,8 @@ export const AuthorizationReasonCode = {
   WORKSPACE_MISMATCH: 'WORKSPACE_MISMATCH',
   PROJECT_MISMATCH: 'PROJECT_MISMATCH',
   UNLISTED_COMMAND: 'UNLISTED_COMMAND',
+  UNAUTHORIZED_ARGUMENTS: 'UNAUTHORIZED_ARGUMENTS',
+  UNAUTHORIZED_WORKING_DIRECTORY: 'UNAUTHORIZED_WORKING_DIRECTORY',
   EXPLICIT_DENY: 'EXPLICIT_DENY',
   UNLISTED_PATH_OPERATION: 'UNLISTED_PATH_OPERATION',
   ALLOWED: 'ALLOWED',
@@ -233,12 +251,26 @@ function pathDecision(request: ExecutionCommandRequest, policy: ExecutionAuthori
   return null
 }
 
+/** Exact sequence equality — same length, same order, same values. Never a prefix/substring match. */
+function exactArgsEqual(claimed: readonly string[], authorized: readonly string[]): boolean {
+  return claimed.length === authorized.length && claimed.every((value, index) => value === authorized[index])
+}
+
+/** Matches on identity alone (commandId/executable), independent of args, so the caller can distinguish "identity unlisted" from "identity listed, args wrong". */
+function findAuthorizedCommandIdentity(
+  policy: ExecutionAuthorizationPolicy,
+  command: ExecutionCommandIdentity,
+): ExecutionAuthorizedCommand | undefined {
+  return policy.allowedCommands.find(entry => entry.commandId === command.commandId && entry.executable === command.executable)
+}
+
 /**
  * Deterministic pure decision over an already-validated request (AC-12).
  * Default DENY; an explicit matching deny overrides any matching allow;
- * a workspace/project mismatch, an unlisted command, or an unlisted path
- * operation each deny with a stable reason code. Performs no command
- * execution and no filesystem access — it only compares strings.
+ * a workspace/project mismatch, an unlisted command identity, an
+ * unauthorized argument vector, an unauthorized working directory, or an
+ * unlisted path operation each deny with a stable reason code. Performs no
+ * command execution and no filesystem access — it only compares strings.
  */
 export function authorizeExecutionCommand(
   request: ExecutionCommandRequest,
@@ -251,11 +283,22 @@ export function authorizeExecutionCommand(
     return deny(AuthorizationReasonCode.PROJECT_MISMATCH, `project '${request.projectId}' does not match the authorized project`)
   }
 
-  const commandAllowed = policy.allowedCommands.some(
-    entry => entry.commandId === request.command.commandId && entry.executable === request.command.executable,
-  )
-  if (!commandAllowed) {
+  const matchedIdentity = findAuthorizedCommandIdentity(policy, request.command)
+  if (matchedIdentity === undefined) {
     return deny(AuthorizationReasonCode.UNLISTED_COMMAND, `command '${request.command.commandId}' is not on the allowlist`)
+  }
+  if (!exactArgsEqual(request.command.args, matchedIdentity.args)) {
+    return deny(
+      AuthorizationReasonCode.UNAUTHORIZED_ARGUMENTS,
+      `command '${request.command.commandId}' is authorized only for argument vector [${matchedIdentity.args.join(', ')}], not [${request.command.args.join(', ')}]`,
+    )
+  }
+
+  if (!policy.allowedWorkingDirectories.includes(request.workingDirectory)) {
+    return deny(
+      AuthorizationReasonCode.UNAUTHORIZED_WORKING_DIRECTORY,
+      `working directory '${request.workingDirectory}' is not on the allowlist`,
+    )
   }
 
   const pathOutcome = pathDecision(request, policy)
@@ -263,5 +306,5 @@ export function authorizeExecutionCommand(
     return pathOutcome
   }
 
-  return { decision: AuthorizationDecision.ALLOW, reasonCode: AuthorizationReasonCode.ALLOWED, message: 'request matches the authorized workspace, command and every declared path operation' }
+  return { decision: AuthorizationDecision.ALLOW, reasonCode: AuthorizationReasonCode.ALLOWED, message: 'request matches the authorized workspace, command, argument vector, working directory and every declared path operation' }
 }

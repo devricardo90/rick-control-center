@@ -25,10 +25,29 @@
  */
 import type { ImplementationSpec, Prisma, PrismaClient } from '@prisma/client'
 import type { CanonicalTraceabilityLink, IdentityFactPair, ReadinessEvaluationOutcome } from '@rick/domain'
-import { EligibilitySignal, evaluateExecutionContractReadiness } from '@rick/domain'
+import { EligibilitySignal, EXECUTION_CONTRACT_EVALUATOR_NAME, EXECUTION_CONTRACT_GENERATOR_VERSION, evaluateExecutionContractReadiness } from '@rick/domain'
 import { findGoverningSpecForTask, readImplementationSpecContent, resolveImplementationSpecEligibilityInTransaction } from './implementation-spec.js'
 import { withConsistentProjectReadTransaction } from './internal/mutable-project-transaction.js'
 import { TaskNotFoundError } from './errors.js'
+
+/**
+ * The evaluator provenance a schema 2.0.0 candidate claims, as read directly
+ * off `ExecutionContractV2.eligibilityBinding.evaluator` — never re-derived
+ * here. `evaluatedAt` is transported but never compared below: it names the
+ * instant the *original* generation evaluation ran, and nothing in this
+ * database re-records that instant for a later readiness check to re-read,
+ * so there is no canonical source to check it against here. It remains
+ * bound structurally — the domain parser already requires it to be a valid,
+ * present ISO timestamp (RIC-SPEC-NDERCC-39-001 §5.4) — which is the only
+ * kind of "binding" available for a historical fact with no re-checkable
+ * canonical state.
+ */
+export interface ClaimedEvaluatorProvenance {
+  readonly evaluatorName: string
+  readonly evaluatorVersion: string
+  readonly rulesVersion: string
+  readonly evaluatedAt: string
+}
 
 /** The exact identity and traceability a schema 2.0.0 candidate claims, as read directly off `ExecutionContractV2` — never re-derived here. */
 export interface ClaimedExecutionContractBinding {
@@ -41,6 +60,9 @@ export interface ClaimedExecutionContractBinding {
   readonly contentHash: string
   readonly rulesVersion: string
   readonly specStatus: string
+  readonly approvedByOperatorId: string
+  readonly approvedAt: string
+  readonly evaluator: ClaimedEvaluatorProvenance
 }
 
 export interface ClaimedTraceabilityLink {
@@ -114,10 +136,43 @@ function canonicalSpecStatusOf(spec: ImplementationSpec | null): string {
   return content.ok ? spec.status : 'INVALID_CONTENT'
 }
 
-function buildIdentityFacts(
-  claim: ExecutionContractReadinessClaim,
-  canonical: { projectId: string, taskId: string, sprintId: string, spec: ImplementationSpec | null },
-): IdentityFactPair[] {
+/**
+ * AC-04 exact-binding field map — every fact this function compares, its
+ * contract v2 location, and where the canonical value it is checked against
+ * actually comes from:
+ *
+ * | claim field (binding.*)  | contract v2 location                        | canonical source                                              |
+ * |---------------------------|----------------------------------------------|----------------------------------------------------------------|
+ * | projectId                 | eligibilityBinding.projectId                  | task.projectId, read fresh in this transaction                 |
+ * | taskId                    | eligibilityBinding.taskId                     | the resolved task row's id                                     |
+ * | sprintId                  | eligibilityBinding.sprintId                   | task.sprintId, read fresh                                      |
+ * | specId                    | eligibilityBinding.specId                     | the governing spec row's id (`findGoverningSpecForTask`)       |
+ * | lineageCode                | eligibilityBinding.lineageCode               | spec.code                                                       |
+ * | specVersion                | eligibilityBinding.specVersion               | spec.version                                                    |
+ * | contentHash                | eligibilityBinding.contentHash               | spec.contentHash                                                |
+ * | rulesVersion                | eligibilityBinding.rulesVersion              | spec.rulesVersion (the ruleset the spec body was written under)|
+ * | specStatus                  | eligibilityBinding.specStatus                | `canonicalSpecStatusOf(spec)` — the same value the FAIL/BLOCKED classifier itself uses |
+ * | approvedByOperatorId         | eligibilityBinding.approvedByOperatorId     | spec.approvedByOperatorId                                      |
+ * | approvedAt                   | eligibilityBinding.approvedAt               | spec.approvedAt, ISO-normalized                                |
+ * | evaluator.evaluatorName       | eligibilityBinding.evaluator.evaluatorName | `EXECUTION_CONTRACT_EVALUATOR_NAME` — a trusted code constant, never the claim's own say-so |
+ * | evaluator.evaluatorVersion    | eligibilityBinding.evaluator.evaluatorVersion | `EXECUTION_CONTRACT_GENERATOR_VERSION` — a trusted code constant |
+ * | evaluator.rulesVersion        | eligibilityBinding.evaluator.rulesVersion  | `eligibility.rulesVersion`, resolved fresh in this same transaction (`SPEC_LIFECYCLE_VERSION`) |
+ *
+ * `evaluator.evaluatedAt` is deliberately absent from this table — see
+ * `ClaimedEvaluatorProvenance`'s doc comment for why no canonical source
+ * exists for it to be checked against here.
+ */
+interface IdentityCanonicalFacts {
+  readonly projectId: string
+  readonly taskId: string
+  readonly sprintId: string
+  readonly spec: ImplementationSpec | null
+  readonly specStatus: string
+  readonly evaluatorRulesVersion: string
+}
+
+/** The pre-existing P0-042 identity facts: project/task/sprint and the governing spec's own row identity. */
+function buildSpecRowIdentityFacts(claim: ExecutionContractReadinessClaim, canonical: IdentityCanonicalFacts): IdentityFactPair[] {
   const spec = canonical.spec
   return [
     { field: 'projectId', claimed: claim.binding.projectId, canonical: canonical.projectId },
@@ -129,6 +184,23 @@ function buildIdentityFacts(
     { field: 'contentHash', claimed: claim.binding.contentHash, canonical: spec === null ? '' : spec.contentHash },
     { field: 'rulesVersion', claimed: claim.binding.rulesVersion, canonical: spec === null ? '' : spec.rulesVersion },
   ]
+}
+
+/** The finding-3 facts: status, approval attribution, and evaluator provenance — see the field-map table above `buildIdentityFacts`. */
+function buildApprovalAndEvaluatorIdentityFacts(claim: ExecutionContractReadinessClaim, canonical: IdentityCanonicalFacts): IdentityFactPair[] {
+  const spec = canonical.spec
+  return [
+    { field: 'specStatus', claimed: claim.binding.specStatus, canonical: canonical.specStatus },
+    { field: 'approvedByOperatorId', claimed: claim.binding.approvedByOperatorId, canonical: spec?.approvedByOperatorId ?? '' },
+    { field: 'approvedAt', claimed: claim.binding.approvedAt, canonical: spec?.approvedAt?.toISOString() ?? '' },
+    { field: 'evaluator.evaluatorName', claimed: claim.binding.evaluator.evaluatorName, canonical: EXECUTION_CONTRACT_EVALUATOR_NAME },
+    { field: 'evaluator.evaluatorVersion', claimed: claim.binding.evaluator.evaluatorVersion, canonical: EXECUTION_CONTRACT_GENERATOR_VERSION },
+    { field: 'evaluator.rulesVersion', claimed: claim.binding.evaluator.rulesVersion, canonical: canonical.evaluatorRulesVersion },
+  ]
+}
+
+function buildIdentityFacts(claim: ExecutionContractReadinessClaim, canonical: IdentityCanonicalFacts): IdentityFactPair[] {
+  return [...buildSpecRowIdentityFacts(claim, canonical), ...buildApprovalAndEvaluatorIdentityFacts(claim, canonical)]
 }
 
 export async function resolveExecutionContractReadinessInTransaction(
@@ -151,7 +223,14 @@ export async function resolveExecutionContractReadinessInTransaction(
     : await readCanonicalTraceability(tx, projectId, spec.id)
 
   const canonicalSpecStatus = canonicalSpecStatusOf(spec)
-  const identity = buildIdentityFacts(claim, { projectId, taskId, sprintId: task.sprintId, spec })
+  const identity = buildIdentityFacts(claim, {
+    projectId,
+    taskId,
+    sprintId: task.sprintId,
+    spec,
+    specStatus: canonicalSpecStatus,
+    evaluatorRulesVersion: eligibility.rulesVersion,
+  })
 
   return evaluateExecutionContractReadiness({
     eligibilitySignal,

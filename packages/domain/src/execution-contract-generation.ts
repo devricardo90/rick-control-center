@@ -61,6 +61,15 @@ import type { ImplementationSpecContent, SpecEligibilityOutcome } from './implem
 
 export const EXECUTION_CONTRACT_GENERATOR_VERSION = 'P0_041_V1' as const
 
+/**
+ * The evaluator identity bound into every candidate's `eligibilityBinding.evaluator`
+ * (§5.4). A named export, not an inline literal, so a reader of a candidate's
+ * evaluator provenance (`execution-contract-readiness.ts`, database package)
+ * can compare the claim against this same trusted constant rather than
+ * trusting the claim's own assertion of what evaluated it.
+ */
+export const EXECUTION_CONTRACT_EVALUATOR_NAME = 'execution-contract-generation' as const
+
 /** Why generation refused. Mirrors the fail-closed convention used by the specification lifecycle. */
 export const ContractGenerationRefusal = {
   /** The specification is not execution-eligible. Carries the eligibility findings verbatim. */
@@ -326,7 +335,7 @@ function assemble(input: ExecutionContractGenerationInput): unknown {
         // constant, not a caller claim (§5.4). `rulesVersion` here is the
         // *eligibility* rule set actually used, taken from the outcome being
         // bound rather than re-asserted by the caller.
-        evaluatorName: 'execution-contract-generation',
+        evaluatorName: EXECUTION_CONTRACT_EVALUATOR_NAME,
         evaluatorVersion: EXECUTION_CONTRACT_GENERATOR_VERSION,
         rulesVersion: eligibility.rulesVersion,
         evaluatedAt: identity.evaluatedAt,

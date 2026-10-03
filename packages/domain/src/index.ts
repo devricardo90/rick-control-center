@@ -259,6 +259,7 @@ export type {
 // eligibility implementation governs both the gate and the generator.
 export {
   ContractGenerationRefusal,
+  EXECUTION_CONTRACT_EVALUATOR_NAME,
   EXECUTION_CONTRACT_GENERATOR_VERSION,
   generateExecutionContract,
 } from './execution-contract-generation.js'

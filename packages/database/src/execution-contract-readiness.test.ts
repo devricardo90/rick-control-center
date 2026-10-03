@@ -20,9 +20,9 @@
  * separately authorized and applied, and skips cleanly until then.
  */
 import { createHash } from 'node:crypto'
-import type { Prisma, PrismaClient, Project, Task } from '@prisma/client'
+import type { PrismaClient, Project, Task } from '@prisma/client'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ReadinessResult } from '@rick/domain'
+import { EXECUTION_CONTRACT_EVALUATOR_NAME, EXECUTION_CONTRACT_GENERATOR_VERSION, ReadinessResult, SPEC_LIFECYCLE_VERSION } from '@rick/domain'
 import type { ImplementationSpecContentInput } from '@rick/domain'
 import { recordDocumentSnapshotSync } from './document-snapshot.js'
 import { createDocumentSource } from './document-source.js'
@@ -34,7 +34,7 @@ import { createProject } from './project.js'
 import { createSprint } from './sprint.js'
 import { extractStrategicTruth } from './strategic-truth.js'
 import { createTask } from './task.js'
-import { createP042TestClient, isIsolatedP042DatabaseUrl, uniqueSlug } from './test-support.js'
+import { createP042SingleConnectionTestClient, createP042TestClient, isIsolatedP042DatabaseUrl, uniqueSlug } from './test-support.js'
 
 const targetsIsolatedInstance = isIsolatedP042DatabaseUrl(process.env['DATABASE_URL'] ?? '')
 
@@ -60,19 +60,47 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
   vi.setConfig({ testTimeout: 30_000 })
 
   const client: PrismaClient = createP042TestClient()
-  const concurrentClient: PrismaClient = createP042TestClient()
+  // AC-11's three distinct database participants (RIC-SPEC-NDERCC-39-001 §6):
+  // `client` above is the READER (holds the project lock and evaluates
+  // readiness). `writerClient` is the WRITER — pinned to a single physical
+  // connection so its backend pid is stable and known before any lock
+  // attempt, letting the OBSERVER identify contention attributable to this
+  // exact backend rather than "some backend is blocked by the reader".
+  // `observerClient` is the OBSERVER — a fully independent connection that
+  // polls `pg_blocking_pids`/`pg_stat_activity`, so its polling never shares
+  // connection/transaction-time budget with the reader's own transaction.
+  const writerClient: PrismaClient = createP042SingleConnectionTestClient()
+  const observerClient: PrismaClient = createP042TestClient()
 
-  // Without this, the AC-11 tests' first-ever use of `concurrentClient` pays
-  // full connection-establishment latency *during* the blocking-detection
-  // poll below, racing it against the poll's own fixed iteration budget —
-  // a test-harness timing artifact, not a property of the resolver under
-  // test. Same fix as implementation-spec.test.ts's own concurrency suite.
+  // All three participants must be connection-ready before any AC-11 test
+  // begins acquiring its lock (T1). Without this, a participant's
+  // first-ever query pays full connection-establishment latency *during*
+  // the test's critical timing window, racing a harness artifact against
+  // the lock invariant under test. Same root fix as
+  // implementation-spec.test.ts's own concurrency suite.
+  //
+  // Deliberately NOT captured here: the writer's backend pid. A pid
+  // captured once at file-start and reused for the rest of the file's
+  // tests is not authoritative — `pg.Pool`'s default `idleTimeoutMillis`
+  // (10s) can and does recycle an idle pooled connection, silently handing
+  // the next query a different backend. Proven directly (RIC-SPEC-NDERCC-39-001
+  // §6 AC-11 diagnostic audit): under full-suite load, more than 10s
+  // elapsed between this prewarm and AC-11(A)'s first real use of
+  // `writerClient`, and the pid captured here was confirmed completely
+  // absent from `pg_stat_activity` by the time the test ran — while the
+  // *actual* (recycled) backend was genuinely, continuously blocked by the
+  // reader the whole time. The fix is to never trust a pid older than the
+  // immediately-preceding query: each AC-11 test re-reads
+  // `writerClient`'s current backend pid itself, immediately before
+  // invoking that test's canonical writer call, with no unrelated
+  // asynchronous work in between — see each test body below.
   beforeAll(async () => {
-    await concurrentClient.$queryRaw`SELECT 1`
+    await observerClient.$queryRaw`SELECT 1`
+    await writerClient.$queryRaw`SELECT 1`
   })
 
   afterAll(async () => {
-    await Promise.all([client.$disconnect(), concurrentClient.$disconnect()])
+    await Promise.all([client.$disconnect(), writerClient.$disconnect(), observerClient.$disconnect()])
   })
 
   function content(): ImplementationSpecContentInput {
@@ -181,6 +209,9 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
   async function claimFor(seed: Awaited<ReturnType<typeof seedReadyTask>>): Promise<ExecutionContractReadinessClaim> {
     const requirement = await client.requirement.findUniqueOrThrow({ where: { id: seed.requirementId } })
     const decision = await client.decision.findUniqueOrThrow({ where: { id: seed.decisionId } })
+    if (seed.spec.approvedByOperatorId === null || seed.spec.approvedAt === null) {
+      throw new Error('seedReadyTask always approves the spec it creates; approval columns must be set')
+    }
     return {
       binding: {
         projectId: seed.project.id,
@@ -192,6 +223,14 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
         contentHash: seed.spec.contentHash,
         rulesVersion: seed.spec.rulesVersion,
         specStatus: seed.spec.status,
+        approvedByOperatorId: seed.spec.approvedByOperatorId,
+        approvedAt: seed.spec.approvedAt.toISOString(),
+        evaluator: {
+          evaluatorName: EXECUTION_CONTRACT_EVALUATOR_NAME,
+          evaluatorVersion: EXECUTION_CONTRACT_GENERATOR_VERSION,
+          rulesVersion: SPEC_LIFECYCLE_VERSION,
+          evaluatedAt: '2026-09-28T10:00:00.000Z',
+        },
       },
       requirements: [linkFor(requirement.id, 'REQUIREMENT', requirement.status, requirement.updatedAt.toISOString())],
       decisions: [linkFor(decision.id, 'DECISION', decision.status, decision.updatedAt.toISOString())],
@@ -223,6 +262,14 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
         contentHash: 'forged-hash',
         rulesVersion: 'forged-rules',
         specStatus: 'APPROVED',
+        approvedByOperatorId: 'forged-operator-id',
+        approvedAt: '2026-09-28T09:00:00.000Z',
+        evaluator: {
+          evaluatorName: 'forged-evaluator',
+          evaluatorVersion: 'forged-version',
+          rulesVersion: 'forged-rules-version',
+          evaluatedAt: '2026-09-28T10:00:00.000Z',
+        },
       },
       requirements: [linkFor('forged-req', 'REQUIREMENT', 'ACTIVE', 'forged')],
       decisions: [],
@@ -246,6 +293,95 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
       })
       expect(outcome.result).toBe(ReadinessResult.FAIL)
     }
+  })
+
+  describe('AC-04: every exact-bound approval and evaluator-provenance fact is independently re-checked against canonical state, not merely transported (finding 3)', () => {
+    it('FAILs on a substituted specStatus, even though the top-level eligibility check reads the same canonical status', async () => {
+      const seed = await seedReadyTask('specstatus')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, specStatus: 'DRAFT' },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'specStatus')).toBe(true)
+    })
+
+    it('FAILs on a substituted approvedByOperatorId', async () => {
+      const seed = await seedReadyTask('approver')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, approvedByOperatorId: 'substituted-operator-id' },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'approvedByOperatorId')).toBe(true)
+    })
+
+    it('FAILs on a substituted approvedAt', async () => {
+      const seed = await seedReadyTask('approvedat')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, approvedAt: '2099-01-01T00:00:00.000Z' },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'approvedAt')).toBe(true)
+    })
+
+    it('FAILs on a claimed evaluator.evaluatorName that disagrees with the trusted code constant, even when every other fact is genuine', async () => {
+      const seed = await seedReadyTask('evalname')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, evaluator: { ...claim.binding.evaluator, evaluatorName: 'a-different-evaluator' } },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'evaluator.evaluatorName')).toBe(true)
+    })
+
+    it('FAILs on a claimed evaluator.evaluatorVersion that disagrees with the trusted code constant', async () => {
+      const seed = await seedReadyTask('evalversion')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, evaluator: { ...claim.binding.evaluator, evaluatorVersion: 'P9_999_V9' } },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'evaluator.evaluatorVersion')).toBe(true)
+    })
+
+    it('FAILs on a claimed evaluator.rulesVersion that disagrees with the freshly resolved eligibility rules version', async () => {
+      const seed = await seedReadyTask('evalrules')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, {
+        ...claim,
+        binding: { ...claim.binding, evaluator: { ...claim.binding.evaluator, rulesVersion: 'STALE_RULES_V0' } },
+      })
+
+      expect(outcome.result).toBe(ReadinessResult.FAIL)
+      expect(outcome.findings.some(finding => finding.field === 'evaluator.rulesVersion')).toBe(true)
+    })
+
+    it('a claim with every approval/evaluator fact genuine still PASSes — the new checks do not reject real claims', async () => {
+      const seed = await seedReadyTask('genuine-approval')
+      const claim = await claimFor(seed)
+
+      const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
+
+      expect(outcome.result).toBe(ReadinessResult.PASS)
+    })
   })
 
   it('AC-05: FAILs on a missing, additional, or substituted traceability link', async () => {
@@ -290,13 +426,31 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
     ).rejects.toThrow()
   })
 
-  it('AC-08: BLOCKs a specification that is currently DRAFT/REJECTED/SUPERSEDED, never PASSes', async () => {
+  it('AC-08: BLOCKs a specification that is currently DRAFT/REJECTED/SUPERSEDED, never PASSes, when the claim honestly reports that status', async () => {
     const seed = await seedReadyTask('lifecycle')
     const claim = await claimFor(seed)
     await client.implementationSpec.update({ where: { id: seed.spec.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } })
 
-    const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
+    // An honest claim — one whose specStatus is refreshed to match the now-SUPERSEDED
+    // canonical state — reaches the known-ineligible BLOCKED path, not a mismatch.
+    const honestClaim = { ...claim, binding: { ...claim.binding, specStatus: 'SUPERSEDED' } }
+    const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, honestClaim)
     expect(outcome.result).toBe(ReadinessResult.BLOCKED)
+  })
+
+  it('AC-04 / AC-08: a claim that still asserts the pre-supersession specStatus FAILs as a stale identity mismatch, never merely BLOCKED', async () => {
+    // The companion case to the test above: this is exactly the Finding-3 gap
+    // — before specStatus was bound as an exact identity fact, a claim that
+    // never updated its specStatus after canonical state moved on was
+    // invisible to this check and fell through to BLOCKED on the canonical
+    // status alone. It must now FAIL as a substituted/stale fact instead.
+    const seed = await seedReadyTask('lifecycle-stale-claim')
+    const claim = await claimFor(seed)
+    await client.implementationSpec.update({ where: { id: seed.spec.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } })
+
+    const outcome = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
+    expect(outcome.result).toBe(ReadinessResult.FAIL)
+    expect(outcome.findings.some(finding => finding.field === 'specStatus')).toBe(true)
   })
 
   it('AC-08/AC-09: FAILs for a task that has never had any governing specification at all', async () => {
@@ -316,6 +470,14 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
         contentHash: 'claimed-hash',
         rulesVersion: 'claimed-rules',
         specStatus: 'APPROVED',
+        approvedByOperatorId: 'claimed-operator-id',
+        approvedAt: '2026-09-28T09:00:00.000Z',
+        evaluator: {
+          evaluatorName: EXECUTION_CONTRACT_EVALUATOR_NAME,
+          evaluatorVersion: EXECUTION_CONTRACT_GENERATOR_VERSION,
+          rulesVersion: SPEC_LIFECYCLE_VERSION,
+          evaluatedAt: '2026-09-28T10:00:00.000Z',
+        },
       },
       requirements: [{ linkType: 'REQUIREMENT', targetId: 'claimed-req', status: 'ACTIVE', freshnessToken: 't1' }],
       decisions: [],
@@ -351,31 +513,95 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
   // testTimeout above already gives the surrounding vitest tests room for
   // seeding plus that.
 
-  // Wall-clock-bounded, not iteration-count-bounded: this environment's
-  // per-round-trip latency varies enough (observed directly while
-  // diagnosing this suite) that a fixed iteration count is not a reliable
-  // proxy for a fixed real-time budget. A time deadline keeps the reader's
-  // total lock-hold time predictable regardless of per-query latency, which
-  // matters because the writer's own Prisma interactive transaction has an
-  // internal ~5s budget it cannot be blocked past without erroring.
-  const BLOCKING_POLL_BUDGET_MS = 3_000
+  // The reader's own `client.$transaction(...)` call in AC-11(A)/(B) also
+  // needs an explicit bound: Prisma's library default for an interactive
+  // transaction is 5000ms, and `observeLockContention` below can
+  // legitimately need longer than that to collect its evidence under
+  // contention — it has no budget of its own by design (see its own doc
+  // comment). Left at the default, the reader's transaction can expire
+  // before the loop ever produces a verdict, which is a test-harness bound
+  // problem, not evidence of a locking defect (passing runs show the real
+  // mechanism resolves in under a second). `timeout` is raised to 25_000ms
+  // (replacing the 5000ms default; an earlier 20_000ms value was observed to
+  // fail under genuine full-repository-suite contention, with the reader's
+  // callback completing at ~20.02-20.06s real evidence-gathering work, not a
+  // hang — 25_000ms gives roughly 25% headroom over that high-water mark
+  // while staying under the 30_000ms testTimeout below) and `maxWait` to
+  // 5_000ms (covering
+  // connection-pool acquisition under contention) — both explicit, both
+  // test-only options passed to this one call site, both staying safely
+  // under this file's own 30_000ms `testTimeout` so that remains the single
+  // outer, authoritative bound. Production code
+  // (`withMutableProjectTransaction`/`withConsistentProjectReadTransaction`/
+  // `lockProject`) is untouched and keeps Prisma's default.
+  const READER_TRANSACTION_BOUND = { maxWait: 5_000, timeout: 25_000 }
 
-  async function waitUntilBlocked(tx: Prisma.TransactionClient): Promise<boolean> {
-    const pidRows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`
-    const holderPid = pidRows[0]?.pid
-    expect(holderPid).toBeDefined()
+  // Evidence-bounded, not a fixed short sub-budget: Postgres's row-level
+  // `SELECT ... FOR UPDATE` lock is a deterministic guarantee, not
+  // best-effort, so a genuine concurrent attempt against the row this
+  // reader holds will eventually show up in `pg_blocking_pids` — there is
+  // no scenario where it is correctly blocked but never observable. A
+  // fixed, load-independent deadline (the prior design) therefore measured
+  // "did we poll often enough in N ms," not "is this actually blocked,"
+  // and gave up before ever checking the one signal (`writerPromise`
+  // settling) that would prove a real miss. This polls until one of two
+  // mutually exclusive, meaningful outcomes is reached — blocked evidence
+  // found, or the writer settled first — and is bounded only by whichever
+  // happens first, or by this file's own `testTimeout` (30s) if neither
+  // ever does. `20`ms between attempts is pacing to avoid flooding
+  // `pg_stat_activity`, not a deadline — it does not bound correctness.
+  /**
+   * Polls on the OBSERVER's own, independent connection — never through the
+   * reader's held transaction — for proof that the exact WRITER backend
+   * (`expectedWriterPid` — the caller's fresh, immediately-pre-invocation
+   * capture; never a pid cached from an earlier point in the file's
+   * lifetime, since `pg.Pool` can silently recycle an idle connection) is
+   * blocked specifically by the exact READER backend (`readerPid`), racing
+   * that evidence against the writer's own promise settling. Bounded only
+   * by whichever happens first, or by this file's own `testTimeout` (30s)
+   * if neither ever does — Postgres's row-level `SELECT ... FOR UPDATE`
+   * lock is a deterministic guarantee, not best-effort, so a genuine
+   * attempt against the row the reader holds will eventually show up in
+   * `pg_blocking_pids`; there is no scenario where it is correctly blocked
+   * but never observable. `20`ms between attempts is pacing to avoid
+   * flooding `pg_stat_activity`, not a deadline — it does not bound
+   * correctness. Moving polling off the reader's connection means it no
+   * longer competes with the reader's own queries for the same
+   * connection/transaction-time budget.
+   */
+  async function observeLockContention(
+    readerPid: number,
+    expectedWriterPid: number,
+    writerPromise: Promise<void>,
+  ): Promise<{ blocked: boolean, writerSettledFirst: boolean }> {
+    let writerSettled = false
+    writerPromise.then(
+      () => { writerSettled = true },
+      () => { writerSettled = true },
+    )
 
-    const deadline = Date.now() + BLOCKING_POLL_BUDGET_MS
-    while (Date.now() < deadline) {
-      const blockedRows = await tx.$queryRaw<{ blocked: number }[]>`
+    while (true) {
+      const blockedRows = await observerClient.$queryRaw<{ blocked: number }[]>`
         SELECT count(*)::int AS blocked
           FROM pg_stat_activity activity
-         WHERE activity.pid <> ${holderPid}
-           AND ${holderPid} = ANY(pg_blocking_pids(activity.pid))
+         WHERE activity.pid = ${expectedWriterPid}
+           AND ${readerPid} = ANY(pg_blocking_pids(activity.pid))
       `
-      if ((blockedRows[0]?.blocked ?? 0) > 0) return true
+      if ((blockedRows[0]?.blocked ?? 0) > 0) {
+        return { blocked: true, writerSettledFirst: false }
+      }
+      // Under Postgres's row-level locking guarantee, the writer's own
+      // blocking statement cannot have returned successfully while this
+      // reader's transaction still holds the row lock (it has not
+      // committed yet — we are still inside the `$transaction` callback).
+      // A settled writer observed here is therefore real evidence that it
+      // was never actually excluded, not merely evidence we polled too
+      // slowly to catch it.
+      if (writerSettled) {
+        return { blocked: false, writerSettledFirst: true }
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
     }
-    return false
   }
 
   it('AC-11(A): a genuine concurrent extractStrategicTruth writer queues behind an open readiness-evaluation transaction', async () => {
@@ -400,15 +626,25 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
 
     const order: string[] = []
     let writerPromise: Promise<void> | undefined
-    let writerBlocked = false
+    let contention: { blocked: boolean, writerSettledFirst: boolean } | undefined
     let readerOutcome: Awaited<ReturnType<typeof resolveExecutionContractReadinessInTransaction>> | undefined
 
     await client.$transaction(async (tx) => {
       // Take exactly the lock `withConsistentProjectReadTransaction` would take, then evaluate.
+      const readerPidRows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`
+      const readerPid = readerPidRows[0]?.pid
+      if (readerPid === undefined) throw new Error('reader participant did not report a backend pid')
       await tx.$queryRaw`SELECT id FROM projects WHERE id = ${seed.project.id}::uuid FOR UPDATE`
       readerOutcome = await resolveExecutionContractReadinessInTransaction(tx, seed.project.id, seed.task.id, claim)
 
-      writerPromise = extractStrategicTruth(concurrentClient, {
+      // Fresh capture, immediately before invocation, with no unrelated
+      // asynchronous work in between: a pid captured any earlier in this
+      // file's lifetime is not trustworthy evidence (`pg.Pool` can recycle
+      // an idle connection) — see the doc comment above `observeLockContention`.
+      const freshWriterPidRows = await writerClient.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`
+      const freshWriterPid = freshWriterPidRows[0]?.pid
+      if (freshWriterPid === undefined) throw new Error('writer participant did not report a fresh backend pid immediately before invocation')
+      writerPromise = extractStrategicTruth(writerClient, {
         projectId: seed.project.id,
         documentSourceId: seed.documentSourceId,
         sourceSnapshotId: secondSnapshot.snapshot.id,
@@ -416,22 +652,30 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
         order.push('writer')
       })
 
-      writerBlocked = await waitUntilBlocked(tx)
-    })
+      contention = await observeLockContention(readerPid, freshWriterPid, writerPromise)
+    }, READER_TRANSACTION_BOUND)
     order.push('commit')
 
     await (writerPromise ?? Promise.reject(new Error('writer was never started')))
 
-    expect(writerBlocked).toBe(true)
+    // All evidence is captured before any assertion runs, so a failure on
+    // one fact never suppresses collection of the others.
+    const after = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
+    if (!contention) throw new Error('lock-contention evidence was never collected')
+
+    // A writer that settled before this reader released the project lock is
+    // real negative evidence under Postgres's locking guarantee — asserted
+    // first and distinctly from "blocked was never observed," so the two
+    // failure modes are never conflated.
+    expect(contention.writerSettledFirst).toBe(false)
+    expect(contention.blocked).toBe(true)
     expect(order).toEqual(['commit', 'writer'])
     // The reader evaluated entirely before the writer's change committed, so
     // it observed the fully-pre-write state.
     expect(readerOutcome?.result).toBe(ReadinessResult.PASS)
-
     // And a fresh evaluation now observes the fully-post-write state — the
     // requirement the writer superseded is no longer ACTIVE, so the old
     // claim (still asserting ACTIVE) no longer matches.
-    const after = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
     expect(after.result).not.toBe(ReadinessResult.PASS)
   })
 
@@ -453,38 +697,54 @@ describe('P0-042 execution contract readiness (isolated instance only)', () => {
 
     const order: string[] = []
     let writerPromise: Promise<void> | undefined
-    let writerBlocked = false
+    let contention: { blocked: boolean, writerSettledFirst: boolean } | undefined
     let readerOutcome: Awaited<ReturnType<typeof resolveExecutionContractReadinessInTransaction>> | undefined
 
     await client.$transaction(async (tx) => {
+      const readerPidRows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`
+      const readerPid = readerPidRows[0]?.pid
+      if (readerPid === undefined) throw new Error('reader participant did not report a backend pid')
       await tx.$queryRaw`SELECT id FROM projects WHERE id = ${seed.project.id}::uuid FOR UPDATE`
       readerOutcome = await resolveExecutionContractReadinessInTransaction(tx, seed.project.id, seed.task.id, claim)
 
-      writerPromise = approveImplementationSpec(concurrentClient, {
+      // Resolved before the fresh pid capture below, so the only thing
+      // between that capture and the writer invocation is synchronous
+      // object construction — no unrelated asynchronous work in the gap.
+      const operatorId = await approverId()
+
+      // Fresh capture, immediately before invocation — see the doc comment
+      // above `observeLockContention` and AC-11(A)'s identical pattern.
+      const freshWriterPidRows = await writerClient.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`
+      const freshWriterPid = freshWriterPidRows[0]?.pid
+      if (freshWriterPid === undefined) throw new Error('writer participant did not report a fresh backend pid immediately before invocation')
+      writerPromise = approveImplementationSpec(writerClient, {
         projectId: seed.project.id,
         specId: successor.id,
-        approvedByOperatorId: await approverId(),
+        approvedByOperatorId: operatorId,
         supersedesSpecId: seed.spec.id,
       }).then(() => {
         order.push('writer')
       })
 
-      writerBlocked = await waitUntilBlocked(tx)
-    })
+      contention = await observeLockContention(readerPid, freshWriterPid, writerPromise)
+    }, READER_TRANSACTION_BOUND)
     order.push('commit')
 
     await (writerPromise ?? Promise.reject(new Error('writer was never started')))
 
-    expect(writerBlocked).toBe(true)
+    // All evidence is captured before any assertion runs.
+    const after = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
+    if (!contention) throw new Error('lock-contention evidence was never collected')
+
+    expect(contention.writerSettledFirst).toBe(false)
+    expect(contention.blocked).toBe(true)
     expect(order).toEqual(['commit', 'writer'])
     // The reader saw the original spec still APPROVED and governing — never
     // a state that mixes the original identity with the successor's.
     expect(readerOutcome?.result).toBe(ReadinessResult.PASS)
-
     // Post-commit, the original spec is SUPERSEDED and the successor (with
     // its own, different traceability set) governs instead — the old claim
     // no longer matches canonical state at all.
-    const after = await resolveExecutionContractReadiness(client, seed.project.id, seed.task.id, claim)
     expect(after.result).not.toBe(ReadinessResult.PASS)
   })
 
