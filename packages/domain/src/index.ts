@@ -110,11 +110,14 @@ export {
   ExecutionAgentRole,
   ExecutionCommandClass,
   ExecutionContractStatus,
+  EXECUTION_CONTRACT_SCHEMA_V2,
   EXECUTION_CONTRACT_SCHEMA_VERSION,
   ExecutionMode,
   ExecutionPreconditionResult,
   ExecutionRiskLevel,
   parseExecutionContract,
+  parseExecutionContractByVersion,
+  parseExecutionContractV2,
   serializeExecutionContract,
 } from './execution-contract.js'
 export type {
@@ -126,8 +129,12 @@ export type {
   ExecutionCompletionPolicy,
   ExecutionContract,
   ExecutionContractIdentity,
+  ExecutionContractIdentityV2,
   ExecutionContractStatus as ExecutionContractStatusType,
+  ExecutionContractV2,
   ExecutionContractValidation,
+  ExecutionEligibilityBindingV2,
+  ExecutionEvaluatorProvenance,
   ExecutionEvidenceRequirement,
   ExecutionGitPolicy,
   ExecutionJiraPolicy,
@@ -142,10 +149,13 @@ export type {
   ExecutionScopeTargets,
   ExecutionSignature,
   ExecutionSourceSnapshot,
+  ExecutionTraceabilityLink,
+  ExecutionTraceabilitySetV2,
   ExecutionValidationGate,
   ExecutionWorkUnit,
   JsonObject,
   JsonValue,
+  ParsedExecutionContractEnvelope,
   SourceDecisionReference,
   SourceDocumentReference,
   SourceJiraReference,
@@ -153,6 +163,47 @@ export type {
   SourceRequirementReference,
   VersionedToolReference,
 } from './execution-contract.js'
+
+// P0-042: deterministic readiness evaluation for a schema 2.0.0 candidate
+// (execution-contract-readiness.ts) and GAP-04 structured command/path
+// authorization (execution-contract-authorization.ts). Neither module
+// performs I/O; the transaction-scoped canonical re-read lives in
+// @rick/database, and runtime command/filesystem enforcement is out of
+// scope for both.
+export {
+  EligibilitySignal,
+  evaluateExecutionContractReadiness,
+  EXECUTION_CONTRACT_READINESS_VERSION,
+  parseEligibilitySignal,
+  ReadinessFindingCode,
+  ReadinessResult,
+} from './execution-contract-readiness.js'
+export type {
+  CanonicalTraceabilityLink,
+  IdentityFactPair,
+  ReadinessEvaluationInput,
+  ReadinessEvaluationOutcome,
+  ReadinessFinding,
+  ReadinessValidation,
+} from './execution-contract-readiness.js'
+
+export {
+  authorizeExecutionCommand,
+  AuthorizationDecision,
+  AuthorizationReasonCode,
+  EXECUTION_CONTRACT_AUTHORIZATION_VERSION,
+  parseExecutionCommandRequest,
+  PathAccessMode,
+  validatePathDeclaration,
+} from './execution-contract-authorization.js'
+export type {
+  AuthorizationOutcome,
+  AuthorizationValidation,
+  ExecutionAuthorizationPolicy,
+  ExecutionCommandIdentity,
+  ExecutionCommandRequest,
+  ExecutionPathOperation,
+} from './execution-contract-authorization.js'
 export type {
   CanonicalSpecInput,
   ImplementationSpecContent,
@@ -208,6 +259,7 @@ export type {
 // eligibility implementation governs both the gate and the generator.
 export {
   ContractGenerationRefusal,
+  EXECUTION_CONTRACT_EVALUATOR_NAME,
   EXECUTION_CONTRACT_GENERATOR_VERSION,
   generateExecutionContract,
 } from './execution-contract-generation.js'
@@ -220,4 +272,5 @@ export type {
   GenerationIdentityInput,
   GenerationSpecInput,
   GenerationTraceabilityInput,
+  GenerationTraceabilityLinkInput,
 } from './execution-contract-generation.js'

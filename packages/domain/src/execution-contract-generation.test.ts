@@ -19,7 +19,7 @@ import type {
 import {
   ExecutionContractStatus,
   ExecutionMode,
-  EXECUTION_CONTRACT_SCHEMA_VERSION,
+  EXECUTION_CONTRACT_SCHEMA_V2,
 } from './execution-contract.js'
 import {
   evaluateSpecExecutionEligibility,
@@ -166,6 +166,9 @@ function generationInput(requirementCount = 1): ExecutionContractGenerationInput
       projectId: 'project-rcc',
       lineageCode: 'RIC-SPEC-NDERCC-38-001',
       version: '1.0.0',
+      contentHash: 'content-hash-1',
+      rulesVersion: 'P1_038_V2',
+      status: 'APPROVED',
       approvedByOperatorId: 'operator-1',
       approvedAt: '2026-09-07T09:00:00.000Z',
       content: CONTENT,
@@ -175,12 +178,13 @@ function generationInput(requirementCount = 1): ExecutionContractGenerationInput
       sprintId: 'sprint-3',
       taskId: 'NDERCC-38',
       createdAt: '2026-09-07T10:00:00.000Z',
+      evaluatedAt: '2026-09-07T10:00:00.000Z',
       createdByKind: 'USER',
       createdById: 'operator-1',
       status: ExecutionContractStatus.DRAFT,
     },
     traceability: {
-      requirements: [{ requirementId: 'requirement-0', projectId: 'project-rcc', code: 'REQ-1', status: 'ACTIVE' }],
+      requirements: [{ targetId: 'requirement-0', projectId: 'project-rcc', linkType: 'REQUIREMENT', status: 'ACTIVE', freshnessToken: '2026-09-01T00:00:00.000Z' }],
       decisions: [],
     },
     environment: environment(),
@@ -314,7 +318,7 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
 
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error(result.failure.message)
-    expect(result.contract.sourceSnapshot.requirements).toHaveLength(1)
+    expect(result.contract.traceability.requirements).toHaveLength(1)
   })
 
   it('refuses a traced requirement belonging to another project', () => {
@@ -322,7 +326,7 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
     const result = generateExecutionContract({
       ...input,
       traceability: {
-        requirements: [{ requirementId: 'req-foreign', projectId: 'project-other', code: 'REQ-X', status: 'ACTIVE' }],
+        requirements: [{ targetId: 'req-foreign', projectId: 'project-other', linkType: 'REQUIREMENT', status: 'ACTIVE', freshnessToken: 't1' }],
         decisions: [],
       },
     })
@@ -341,7 +345,7 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
     const result = generateExecutionContract({
       ...input,
       traceability: {
-        requirements: [{ requirementId: 'requirement-0', projectId: 'project-rcc', code: 'REQ-1', status }],
+        requirements: [{ targetId: 'requirement-0', projectId: 'project-rcc', linkType: 'REQUIREMENT', status, freshnessToken: 't1' }],
         decisions: [],
       },
     })
@@ -357,7 +361,7 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
       ...input,
       traceability: {
         requirements: input.traceability.requirements,
-        decisions: [{ decisionId: 'dec-1', projectId: 'project-rcc', code: 'DEC-1', status: 'REJECTED' }],
+        decisions: [{ targetId: 'dec-1', projectId: 'project-rcc', linkType: 'DECISION', status: 'REJECTED', freshnessToken: 't1' }],
       },
     })
 
@@ -372,7 +376,7 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
       ...input,
       traceability: {
         requirements: input.traceability.requirements,
-        decisions: [{ decisionId: 'dec-1', projectId: 'project-rcc', code: 'DEC-1', status: 'APPROVED' }],
+        decisions: [{ targetId: 'dec-1', projectId: 'project-rcc', linkType: 'DECISION', status: 'APPROVED', freshnessToken: 't1' }],
       },
     })
 
@@ -402,34 +406,40 @@ describe('traceability coherence is enforced at the generation boundary (PR #24 
 })
 
 describe('P0-041 generation output', () => {
-  it('generates a contract conforming to the canonical P0-040 schema', () => {
+  it('generates a contract conforming to the canonical schema 2.0.0', () => {
     const result = generateExecutionContract(generationInput())
 
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error(result.failure.message)
-    expect(result.contract.identity.contractVersion).toBe(EXECUTION_CONTRACT_SCHEMA_VERSION)
+    expect(result.contract.identity.contractVersion).toBe(EXECUTION_CONTRACT_SCHEMA_V2)
   })
 
-  it('maps the approved specification identity onto the contract', () => {
+  it('binds the exact approved specification identity onto the contract', () => {
     const result = generateExecutionContract(generationInput())
 
     if (!result.ok) throw new Error(result.failure.message)
-    expect(result.contract.identity.approvedImplementationSpec).toEqual({
+    expect(result.contract.eligibilityBinding).toMatchObject({
       specId: 'spec-1',
       projectId: 'project-rcc',
+      taskId: 'NDERCC-38',
       lineageCode: 'RIC-SPEC-NDERCC-38-001',
-      version: '1.0.0',
+      specVersion: '1.0.0',
+      contentHash: 'content-hash-1',
+      rulesVersion: 'P1_038_V2',
+      specStatus: 'APPROVED',
       approvedByOperatorId: 'operator-1',
       approvedAt: '2026-09-07T09:00:00.000Z',
     })
+    expect(result.contract.eligibilityBinding.evaluator.rulesVersion).toBe('P1_038_V2')
   })
 
-  it('carries the traced strategic truth into the source snapshot', () => {
+  it('carries the traced strategic truth into the traceability set', () => {
     const result = generateExecutionContract(generationInput())
 
     if (!result.ok) throw new Error(result.failure.message)
-    expect(result.contract.sourceSnapshot.requirements).toHaveLength(1)
-    expect(result.contract.sourceSnapshot.requirements[0]?.requirementId).toBe('requirement-0')
+    expect(result.contract.traceability.requirements).toHaveLength(1)
+    expect(result.contract.traceability.requirements[0]?.targetId).toBe('requirement-0')
+    expect(result.contract.traceability.requirements[0]?.linkId).toBe('REQUIREMENT:requirement-0')
   })
 
   it('derives non-goals and objectives from the specification body', () => {

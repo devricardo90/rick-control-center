@@ -907,6 +907,27 @@ function checkTopLevel(input: UnknownRecord): ExecutionContractValidation<void> 
   return unexpected === undefined ? ok(undefined) : err(`contract contains unsupported field ${unexpected}`)
 }
 
+/**
+ * Shared between v1 and v2: every `objectives.taskObjectives[].taskId` must
+ * belong to the contract's own `taskIds`, and no task may be named twice.
+ * Extracted so v1 and v2 can never silently diverge on what is, in both
+ * schemas, the same invariant.
+ */
+function validateTaskObjectiveReferences(
+  taskIds: readonly string[],
+  contractObjectives: ExecutionObjectives,
+): ExecutionContractValidation<void> {
+  const taskIdSet = new Set(taskIds)
+  const objectiveTaskIds = contractObjectives.taskObjectives.map(objective => objective.taskId)
+  if (objectiveTaskIds.some(taskId => !taskIdSet.has(taskId))) {
+    return err('contract.objectives.taskObjectives must reference contract.identity.taskIds')
+  }
+  if (new Set(objectiveTaskIds).size !== objectiveTaskIds.length) {
+    return err('contract.objectives.taskObjectives must not contain duplicate task IDs')
+  }
+  return ok(undefined)
+}
+
 function validateCrossReferences(
   contractIdentity: ExecutionContractIdentity,
   sourceSnapshotValue: ExecutionSourceSnapshot,
@@ -918,14 +939,8 @@ function validateCrossReferences(
   if (contractIdentity.sourceSnapshotId !== sourceSnapshotValue.snapshotId) {
     return err('contract.identity.sourceSnapshotId must equal contract.sourceSnapshot.snapshotId')
   }
-  const taskIds = new Set(contractIdentity.taskIds)
-  const objectiveTaskIds = contractObjectives.taskObjectives.map(objective => objective.taskId)
-  if (objectiveTaskIds.some(taskId => !taskIds.has(taskId))) {
-    return err('contract.objectives.taskObjectives must reference contract.identity.taskIds')
-  }
-  if (new Set(objectiveTaskIds).size !== objectiveTaskIds.length) {
-    return err('contract.objectives.taskObjectives must not contain duplicate task IDs')
-  }
+  const objectiveReferences = validateTaskObjectiveReferences(contractIdentity.taskIds, contractObjectives)
+  if (!objectiveReferences.ok) return objectiveReferences
   if (sourceSnapshotValue.requirements.some(requirement => requirement.projectId !== contractIdentity.projectId)) {
     return err('contract.sourceSnapshot.requirements must belong to contract.identity.projectId')
   }
@@ -1007,4 +1022,368 @@ function stableValue(value: JsonValue): JsonValue {
 /** Deterministic structural JSON representation; this is not a contract hash. */
 export function serializeExecutionContract(contract: ExecutionContract): string {
   return JSON.stringify(stableValue(contract as unknown as JsonValue))
+}
+
+// ── Schema 2.0.0 (P0-042 / RIC-SPEC-NDERCC-39-001 §4-§5) ──────────────────────
+//
+// RIC-011 §23 classifies mandatory exact-eligibility bindings and structured
+// authorization fields as an incompatible structural/semantic change, so
+// version 2.0.0 is a MAJOR schema, added here rather than edited into the
+// schema above. Version 1.0.0 contracts, and the parser above, are untouched:
+// they remain readable for historical inspection only and grant no execution
+// authority (§4.2). `parseExecutionContractByVersion` is the fail-closed
+// dispatcher a caller should use when the version is not known in advance.
+
+export const EXECUTION_CONTRACT_SCHEMA_V2 = '2.0.0' as const
+
+/**
+ * Provenance of the specification-eligibility evaluation this contract binds
+ * to (§5.4). `evaluatorName`/`evaluatorVersion` identify the trusted code that
+ * produced the eligibility outcome being bound — module constants, never a
+ * caller-supplied claim. `rulesVersion` is the eligibility rule set actually
+ * used (`SpecEligibilityOutcome.rulesVersion`), and `evaluatedAt` is supplied
+ * by the caller (like `identity.createdAt`), not read from a clock here.
+ */
+export interface ExecutionEvaluatorProvenance {
+  readonly evaluatorName: string
+  readonly evaluatorVersion: string
+  readonly rulesVersion: string
+  readonly evaluatedAt: string
+}
+
+/**
+ * One canonical traceability link (§5.2). `freshnessToken` is an opaque
+ * version/freshness marker for the linked record — this schema only ever
+ * compares it for equality and never interprets its value, so a caller may
+ * supply any stable per-record marker (an `updatedAt` timestamp is what the
+ * database boundary uses).
+ */
+export interface ExecutionTraceabilityLink {
+  readonly linkId: string
+  readonly linkType: string
+  readonly targetId: string
+  readonly status: string
+  readonly freshnessToken: string
+}
+
+export interface ExecutionTraceabilitySetV2 {
+  readonly requirements: readonly ExecutionTraceabilityLink[]
+  readonly decisions: readonly ExecutionTraceabilityLink[]
+}
+
+/** Exact specification and work identity a v2 contract is bound to (§5.1). */
+export interface ExecutionEligibilityBindingV2 {
+  readonly projectId: string
+  readonly taskId: string
+  readonly sprintId: string
+  readonly specId: string
+  readonly lineageCode: string
+  readonly specVersion: string
+  readonly contentHash: string
+  readonly rulesVersion: string
+  readonly specStatus: string
+  readonly approvedByOperatorId: string
+  readonly approvedAt: string
+  readonly evaluator: ExecutionEvaluatorProvenance
+}
+
+export interface ExecutionContractIdentityV2 {
+  readonly contractId: string
+  /** Must equal `EXECUTION_CONTRACT_SCHEMA_V2`; the parser rejects anything else. */
+  readonly contractVersion: string
+  readonly projectId: string
+  readonly sprintId: string
+  readonly taskIds: readonly string[]
+  readonly createdAt: string
+  readonly createdBy: ExecutionActorReference
+  readonly sourceSnapshotId: string
+  readonly contentHash: string | null
+  readonly status: ExecutionContractStatus
+}
+
+/**
+ * Schema 2.0.0. `eligibilityBinding` and `traceability` replace v1's simple
+ * `approvedImplementationSpec` reference and `sourceSnapshot.requirements` /
+ * `.decisions` arrays with the exact, evaluator-attributed bindings §5
+ * requires; every other section is unchanged from v1 in shape and meaning.
+ *
+ * This type describes the candidate's structure only. It carries no
+ * readiness verdict: PASS/BLOCKED/FAIL/INCONCLUSIVE is the *output* of
+ * evaluating a contract like this one against canonical state
+ * (`execution-contract-readiness.ts`), never a field the contract itself
+ * stores or trusts about itself (SDD revision 10, §13 and `authorityBoundary`
+ * in the Execution Contract artifact: a valid or parsed candidate conveys no
+ * execution or side-effect authority).
+ */
+export interface ExecutionContractV2 {
+  readonly identity: ExecutionContractIdentityV2
+  readonly eligibilityBinding: ExecutionEligibilityBindingV2
+  readonly traceability: ExecutionTraceabilitySetV2
+  readonly sourceSnapshot: Omit<ExecutionSourceSnapshot, 'requirements' | 'decisions'>
+  readonly objectives: ExecutionObjectives
+  readonly scope: ExecutionScope
+  readonly executionMode: ExecutionMode
+  readonly agents: readonly ExecutionAgentAssignment[]
+  readonly preconditions: readonly ExecutionPrecondition[]
+  readonly workUnits: readonly ExecutionWorkUnit[]
+  readonly commandPolicy: ExecutionCommandPolicy
+  readonly riskAssessment: ExecutionRiskAssessment
+  readonly validations: readonly ExecutionValidationGate[]
+  readonly evidenceRequirements: readonly ExecutionEvidenceRequirement[]
+  readonly approvalGates: readonly ExecutionApprovalGate[]
+  readonly gitPolicy: ExecutionGitPolicy
+  readonly jiraPolicy: ExecutionJiraPolicy
+  readonly retryPolicy: ExecutionRetryPolicy
+  readonly recoveryPolicy: ExecutionRecoveryPolicy
+  readonly completionPolicy: ExecutionCompletionPolicy
+  readonly signatures: readonly ExecutionSignature[]
+}
+
+/** `evaluatedAt` is a timestamp, not free text — validated the same way as `identity.createdAt`, so a malformed value fails parsing instead of being silently accepted as any non-empty string. */
+function evaluatorProvenance(value: unknown, path: string): ExecutionContractValidation<ExecutionEvaluatorProvenance> {
+  const input = record(value, path)
+  if (!input.ok) return input
+  const fields = ['evaluatorName', 'evaluatorVersion', 'rulesVersion', 'evaluatedAt']
+  for (const field of fields) {
+    const present = valueAt(input.value, field, path)
+    if (!present.ok) return present
+  }
+  const parsed = parseAll(
+    text(input.value.evaluatorName, `${path}.evaluatorName`),
+    text(input.value.evaluatorVersion, `${path}.evaluatorVersion`),
+    text(input.value.rulesVersion, `${path}.rulesVersion`),
+    isoTimestamp(input.value.evaluatedAt, `${path}.evaluatedAt`),
+  )
+  if (!parsed.ok) return parsed
+  return ok({ evaluatorName: parsed.value[0], evaluatorVersion: parsed.value[1], rulesVersion: parsed.value[2], evaluatedAt: parsed.value[3] })
+}
+
+function traceabilityLink(value: unknown, path: string): ExecutionContractValidation<ExecutionTraceabilityLink> {
+  return stringFields(value, path, ['linkId', 'linkType', 'targetId', 'status', 'freshnessToken'] as const)
+}
+
+function traceabilitySetV2(value: unknown, path: string): ExecutionContractValidation<ExecutionTraceabilitySetV2> {
+  const input = record(value, path)
+  if (!input.ok) return input
+  const requirements = objectArray(input.value.requirements, `${path}.requirements`, traceabilityLink)
+  const decisions = objectArray(input.value.decisions, `${path}.decisions`, traceabilityLink)
+  const parsed = parseAll(requirements, decisions)
+  if (!parsed.ok) return parsed
+  return ok({ requirements: parsed.value[0], decisions: parsed.value[1] })
+}
+
+const ELIGIBILITY_BINDING_TEXT_FIELDS = [
+  'projectId',
+  'taskId',
+  'sprintId',
+  'specId',
+  'lineageCode',
+  'specVersion',
+  'contentHash',
+  'rulesVersion',
+  'specStatus',
+  'approvedByOperatorId',
+] as const
+
+/** `approvedAt` is a timestamp, validated the same way as `identity.createdAt` and `evaluator.evaluatedAt` — not part of the plain-text field list above. */
+function eligibilityBindingV2(value: unknown, path: string): ExecutionContractValidation<ExecutionEligibilityBindingV2> {
+  const input = record(value, path)
+  if (!input.ok) return input
+  const evaluatorField = valueAt(input.value, 'evaluator', path)
+  if (!evaluatorField.ok) return evaluatorField
+  const approvedAtField = valueAt(input.value, 'approvedAt', path)
+  if (!approvedAtField.ok) return approvedAtField
+  const fields = stringFields(input.value, path, ELIGIBILITY_BINDING_TEXT_FIELDS)
+  const approvedAt = isoTimestamp(validated(approvedAtField), `${path}.approvedAt`)
+  const evaluator = evaluatorProvenance(validated(evaluatorField), `${path}.evaluator`)
+  const parsed = parseAll(fields, approvedAt, evaluator)
+  if (!parsed.ok) return parsed
+  return ok({ ...parsed.value[0], approvedAt: parsed.value[1], evaluator: parsed.value[2] })
+}
+
+function requireExactContractVersion(value: unknown, path: string): ExecutionContractValidation<string> {
+  const parsed = text(value, path)
+  if (!parsed.ok) return parsed
+  return parsed.value === EXECUTION_CONTRACT_SCHEMA_V2 ? parsed : err(`${path} must equal ${EXECUTION_CONTRACT_SCHEMA_V2}`)
+}
+
+function requireDistinctTaskIds(value: unknown, path: string): ExecutionContractValidation<readonly string[]> {
+  const parsed = stringArray(value, path)
+  if (!parsed.ok) return parsed
+  if (parsed.value.length === 0) return err(`${path} must contain at least one task`)
+  if (new Set(parsed.value).size !== parsed.value.length) return err(`${path} must not contain duplicates`)
+  return parsed
+}
+
+function identityV2(value: unknown, path: string): ExecutionContractValidation<ExecutionContractIdentityV2> {
+  const item = record(value, path)
+  if (!item.ok) return item
+  const fields = ['contractId', 'contractVersion', 'projectId', 'sprintId', 'taskIds', 'createdAt', 'createdBy', 'sourceSnapshotId', 'contentHash', 'status']
+  for (const field of fields) {
+    const present = valueAt(item.value, field, path)
+    if (!present.ok) return present
+  }
+  const parsed = parseAll(text(item.value.contractId, `${path}.contractId`), requireExactContractVersion(item.value.contractVersion, `${path}.contractVersion`), text(item.value.projectId, `${path}.projectId`), text(item.value.sprintId, `${path}.sprintId`), requireDistinctTaskIds(item.value.taskIds, `${path}.taskIds`), isoTimestamp(item.value.createdAt, `${path}.createdAt`), actor(item.value.createdBy, `${path}.createdBy`), text(item.value.sourceSnapshotId, `${path}.sourceSnapshotId`), nullableText(item.value.contentHash, `${path}.contentHash`), oneOf(item.value.status, `${path}.status`, CONTRACT_STATUSES))
+  if (!parsed.ok) return parsed
+  return ok({ contractId: parsed.value[0], contractVersion: parsed.value[1], projectId: parsed.value[2], sprintId: parsed.value[3], taskIds: parsed.value[4], createdAt: parsed.value[5], createdBy: parsed.value[6], sourceSnapshotId: parsed.value[7], contentHash: parsed.value[8], status: parsed.value[9] })
+}
+
+function sourceSnapshotV2(value: unknown, path: string): ExecutionContractValidation<Omit<ExecutionSourceSnapshot, 'requirements' | 'decisions'>> {
+  const input = record(value, path)
+  if (!input.ok) return input
+  const fields = ['snapshotId', 'approvedDocuments', 'jiraIssues', 'repository', 'exceptions', 'environmentProfile', 'agentVersions', 'skillVersions', 'protocolVersion', 'riskEngineVersion']
+  for (const field of fields) {
+    const required = valueAt(input.value, field, path)
+    if (!required.ok) return required
+  }
+  const parsed = parseAll(text(input.value.snapshotId, `${path}.snapshotId`), objectArray(input.value.approvedDocuments, `${path}.approvedDocuments`, sourceDocument), objectArray(input.value.jiraIssues, `${path}.jiraIssues`, sourceJira), sourceRepository(input.value.repository, `${path}.repository`), stringArray(input.value.exceptions, `${path}.exceptions`), jsonObject(input.value.environmentProfile, `${path}.environmentProfile`), objectArray(input.value.agentVersions, `${path}.agentVersions`, versionedTool), objectArray(input.value.skillVersions, `${path}.skillVersions`, versionedTool), text(input.value.protocolVersion, `${path}.protocolVersion`), text(input.value.riskEngineVersion, `${path}.riskEngineVersion`))
+  if (!parsed.ok) return parsed
+  return ok({ snapshotId: parsed.value[0], approvedDocuments: parsed.value[1], jiraIssues: parsed.value[2], repository: parsed.value[3], exceptions: parsed.value[4], environmentProfile: parsed.value[5], agentVersions: parsed.value[6], skillVersions: parsed.value[7], protocolVersion: parsed.value[8], riskEngineVersion: parsed.value[9] })
+}
+
+function checkTopLevelV2(input: UnknownRecord): ExecutionContractValidation<void> {
+  const required = ['identity', 'eligibilityBinding', 'traceability', 'sourceSnapshot', 'objectives', 'scope', 'executionMode', 'agents', 'preconditions', 'workUnits', 'commandPolicy', 'riskAssessment', 'validations', 'evidenceRequirements', 'approvalGates', 'gitPolicy', 'jiraPolicy', 'retryPolicy', 'recoveryPolicy', 'completionPolicy', 'signatures']
+  for (const field of required) if (!Object.prototype.hasOwnProperty.call(input, field)) return err(`contract.${field} is required`)
+  const unexpected = Object.keys(input).find(key => !required.includes(key))
+  return unexpected === undefined ? ok(undefined) : err(`contract contains unsupported field ${unexpected}`)
+}
+
+/**
+ * A v2 traceability set must not be empty (AC-05: "a specification with no
+ * required traceability links is ineligible"). The eligibility evaluator
+ * already enforces this upstream; this is a structural backstop so a v2
+ * contract can never be *parsed* as complete while claiming zero requirement
+ * links, independent of whatever produced it.
+ */
+function validateTraceabilityNotEmpty(traceability: ExecutionTraceabilitySetV2): ExecutionContractValidation<void> {
+  if (traceability.requirements.length === 0) {
+    return err('contract.traceability.requirements must contain at least one link')
+  }
+  return ok(undefined)
+}
+
+function validateCrossReferencesV2(
+  contractIdentity: ExecutionContractIdentityV2,
+  binding: ExecutionEligibilityBindingV2,
+  sourceSnapshotValue: Omit<ExecutionSourceSnapshot, 'requirements' | 'decisions'>,
+  contractObjectives: ExecutionObjectives,
+): ExecutionContractValidation<void> {
+  if (contractIdentity.projectId !== binding.projectId) {
+    return err('contract.eligibilityBinding.projectId must equal contract.identity.projectId')
+  }
+  if (!contractIdentity.taskIds.includes(binding.taskId)) {
+    return err('contract.eligibilityBinding.taskId must be one of contract.identity.taskIds')
+  }
+  // AC-04 names sprint as an exact-bound identity field; identity.sprintId and
+  // eligibilityBinding.sprintId are two representations of that one fact and
+  // must never be allowed to diverge within a single contract.
+  if (contractIdentity.sprintId !== binding.sprintId) {
+    return err('contract.eligibilityBinding.sprintId must equal contract.identity.sprintId')
+  }
+  if (contractIdentity.sourceSnapshotId !== sourceSnapshotValue.snapshotId) {
+    return err('contract.identity.sourceSnapshotId must equal contract.sourceSnapshot.snapshotId')
+  }
+  const objectiveReferences = validateTaskObjectiveReferences(contractIdentity.taskIds, contractObjectives)
+  if (!objectiveReferences.ok) return objectiveReferences
+  return ok(undefined)
+}
+
+/**
+ * Parses a schema 2.0.0 candidate. Structural validity only, exactly like
+ * `parseExecutionContract` for v1: this proves the shape conforms, not that
+ * canonical sources currently agree with it — that is
+ * `execution-contract-readiness.ts`'s job, run against fresh database state.
+ */
+export function parseExecutionContractV2(input: unknown): ExecutionContractValidation<ExecutionContractV2> {
+  const top = record(input, 'contract')
+  if (!top.ok) return top
+  const shape = checkTopLevelV2(top.value)
+  if (!shape.ok) return shape
+  const parsedIdentity = identityV2(top.value.identity, 'contract.identity')
+  const parsedBinding = eligibilityBindingV2(top.value.eligibilityBinding, 'contract.eligibilityBinding')
+  const parsedTraceability = traceabilitySetV2(top.value.traceability, 'contract.traceability')
+  const parsedSnapshot = sourceSnapshotV2(top.value.sourceSnapshot, 'contract.sourceSnapshot')
+  const parsedObjectives = objectives(top.value.objectives, 'contract.objectives')
+  const scopeInput = record(top.value.scope, 'contract.scope')
+  if (!scopeInput.ok) return scopeInput
+  const parsedScope = scopeTargets(scopeInput.value.allowed, 'contract.scope.allowed')
+  const denied = scopeTargets(scopeInput.value.denied, 'contract.scope.denied')
+  const dirtyWorktreePolicy = text(scopeInput.value.dirtyWorktreePolicy, 'contract.scope.dirtyWorktreePolicy')
+  const parsedMode = oneOf(top.value.executionMode, 'contract.executionMode', EXECUTION_MODES)
+  const parsedAgents = agents(top.value.agents, 'contract.agents')
+  const parsedPreconditions = preconditions(top.value.preconditions, 'contract.preconditions')
+  const parsedWorkUnits = workUnits(top.value.workUnits, 'contract.workUnits')
+  const parsedCommandPolicy = commandPolicy(top.value.commandPolicy, 'contract.commandPolicy')
+  const parsedRiskAssessment = riskAssessment(top.value.riskAssessment, 'contract.riskAssessment')
+  const parsedValidations = validations(top.value.validations, 'contract.validations')
+  const parsedEvidenceRequirements = evidenceRequirements(top.value.evidenceRequirements, 'contract.evidenceRequirements')
+  const parsedApprovalGates = approvalGates(top.value.approvalGates, 'contract.approvalGates')
+  const parsedGitPolicy = gitPolicy(top.value.gitPolicy, 'contract.gitPolicy')
+  const parsedJiraPolicy = jiraPolicy(top.value.jiraPolicy, 'contract.jiraPolicy')
+  const parsedRetryPolicy = retryPolicy(top.value.retryPolicy, 'contract.retryPolicy')
+  const parsedRecoveryPolicy = recoveryPolicy(top.value.recoveryPolicy, 'contract.recoveryPolicy')
+  const parsedCompletionPolicy = completionPolicy(top.value.completionPolicy, 'contract.completionPolicy')
+  const parsedSignatures = signatures(top.value.signatures, 'contract.signatures')
+  const parsed = parseAll(parsedIdentity, parsedBinding, parsedTraceability, parsedSnapshot, parsedObjectives, parsedScope, denied, dirtyWorktreePolicy, parsedMode, parsedAgents, parsedPreconditions, parsedWorkUnits, parsedCommandPolicy, parsedRiskAssessment, parsedValidations, parsedEvidenceRequirements, parsedApprovalGates, parsedGitPolicy, parsedJiraPolicy, parsedRetryPolicy, parsedRecoveryPolicy, parsedCompletionPolicy, parsedSignatures)
+  if (!parsed.ok) return parsed
+  const notEmpty = validateTraceabilityNotEmpty(parsed.value[2])
+  if (!notEmpty.ok) return notEmpty
+  const crossReferences = validateCrossReferencesV2(parsed.value[0], parsed.value[1], parsed.value[3], parsed.value[4])
+  if (!crossReferences.ok) return crossReferences
+  return ok({
+    identity: parsed.value[0],
+    eligibilityBinding: parsed.value[1],
+    traceability: parsed.value[2],
+    sourceSnapshot: parsed.value[3],
+    objectives: parsed.value[4],
+    scope: { allowed: parsed.value[5], denied: parsed.value[6], dirtyWorktreePolicy: parsed.value[7] },
+    executionMode: parsed.value[8],
+    agents: parsed.value[9],
+    preconditions: parsed.value[10],
+    workUnits: parsed.value[11],
+    commandPolicy: parsed.value[12],
+    riskAssessment: parsed.value[13],
+    validations: parsed.value[14],
+    evidenceRequirements: parsed.value[15],
+    approvalGates: parsed.value[16],
+    gitPolicy: parsed.value[17],
+    jiraPolicy: parsed.value[18],
+    retryPolicy: parsed.value[19],
+    recoveryPolicy: parsed.value[20],
+    completionPolicy: parsed.value[21],
+    signatures: parsed.value[22],
+  })
+}
+
+/** Tags which schema a contract was parsed as, so a caller never has to guess which type it received. */
+export type ParsedExecutionContractEnvelope =
+  | { readonly schema: '1.0', readonly contract: ExecutionContract }
+  | { readonly schema: '2.0', readonly contract: ExecutionContractV2 }
+
+/**
+ * Fail-closed version dispatch (§4.3): an unknown `contractVersion` is
+ * rejected rather than guessed at, a `1.x` version is parsed by the
+ * unmodified v1 parser (historical read only — §4.2, `authorityBoundary`),
+ * and exactly `2.0.0` is parsed by `parseExecutionContractV2`. There is no
+ * upgrade path: a v1 contract is never migrated into a v2 shape.
+ */
+export function parseExecutionContractByVersion(input: unknown): ExecutionContractValidation<ParsedExecutionContractEnvelope> {
+  const top = record(input, 'contract')
+  if (!top.ok) return top
+  const identityInput = record(top.value.identity, 'contract.identity')
+  if (!identityInput.ok) return identityInput
+  const versionField = valueAt(identityInput.value, 'contractVersion', 'contract.identity')
+  if (!versionField.ok) return versionField
+  const version = text(validated(versionField), 'contract.identity.contractVersion')
+  if (!version.ok) return version
+
+  if (version.value.startsWith('1.')) {
+    const parsedV1 = parseExecutionContract(input)
+    return parsedV1.ok ? ok({ schema: '1.0', contract: parsedV1.value }) : parsedV1
+  }
+  if (version.value === EXECUTION_CONTRACT_SCHEMA_V2) {
+    const parsedV2 = parseExecutionContractV2(input)
+    return parsedV2.ok ? ok({ schema: '2.0', contract: parsedV2.value }) : parsedV2
+  }
+  return err(`contract.identity.contractVersion '${version.value}' is not a supported schema version`)
 }

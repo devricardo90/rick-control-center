@@ -797,7 +797,7 @@ export async function listImplementationSpecDecisionIds(
  * not ready (`NOT_APPROVED`, `SUPERSEDED`, `INVALID_CONTENT`) instead of a
  * bare "missing" for a Task that has drafts sitting in front of it.
  */
-async function findGoverningSpecForTask(
+export async function findGoverningSpecForTask(
   tx: Prisma.TransactionClient,
   projectId: string,
   taskId: string,
